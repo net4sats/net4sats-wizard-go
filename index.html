@@ -1,0 +1,309 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>net4sats — Router Setup</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    background: linear-gradient(135deg, #0a0e27 0%, #1a1f3a 50%, #0a0e27 100%);
+    color: #e8eaf6; min-height: 100vh;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .container { max-width: 540px; width: 90%; padding: 2rem; }
+  .logo { text-align: center; margin-bottom: 2rem; }
+  .logo h1 { font-size: 2rem; font-weight: 800; letter-spacing: -0.02em; }
+  .logo h1 span { color: #f7931a; }
+  .logo p { color: #8892b0; font-size: 0.85rem; margin-top: 0.3rem; }
+  .card {
+    background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 16px; padding: 1.5rem; backdrop-filter: blur(10px);
+  }
+  label { display: block; font-size: 0.8rem; color: #8892b0; margin-bottom: 0.4rem; font-weight: 600; }
+  select, input {
+    width: 100%; padding: 12px 14px; font-size: 0.95rem;
+    background: rgba(0,0,0,0.3); border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 10px; color: #e8eaf6; outline: none;
+    transition: border-color 0.2s;
+  }
+  select:focus, input:focus { border-color: #f7931a; }
+  select option { background: #1a1f3a; }
+  .field { margin-bottom: 1.2rem; }
+  .btn {
+    width: 100%; padding: 14px; font-size: 1rem; font-weight: 700;
+    border: none; border-radius: 10px; cursor: pointer;
+    background: linear-gradient(135deg, #f7931a, #e87b00); color: white;
+    transition: transform 0.15s, box-shadow 0.2s;
+  }
+  .btn:hover { transform: translateY(-1px); box-shadow: 0 8px 24px rgba(247,147,26,0.3); }
+  .btn:disabled { opacity: 0.5; cursor: not-allowed; transform: none; box-shadow: none; }
+  .btn-secondary {
+    background: rgba(255,255,255,0.1); color: #e8eaf6;
+    margin-top: 0.5rem;
+  }
+  .scanning { text-align: center; padding: 2rem; color: #8892b0; }
+  .spinner {
+    border: 3px solid rgba(255,255,255,0.1); border-top-color: #f7931a;
+    border-radius: 50%; width: 40px; height: 40px;
+    animation: spin 0.8s linear infinite; margin: 0 auto 1rem;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .steps { margin-top: 1.5rem; }
+  .step {
+    display: flex; align-items: center; padding: 0.6rem 0;
+    border-bottom: 1px solid rgba(255,255,255,0.05); font-size: 0.85rem;
+  }
+  .step:last-child { border-bottom: none; }
+  .step-icon { width: 24px; height: 24px; margin-right: 0.8rem; flex-shrink: 0; text-align: center; }
+  .step-icon.pending { color: #4a5568; }
+  .step-icon.running { color: #f7931a; animation: pulse 1s ease-in-out infinite; }
+  .step-icon.done { color: #48bb78; }
+  .step-icon.failed { color: #f56565; }
+  .step-desc { flex: 1; }
+  .step-desc.pending { color: #4a5568; }
+  .step-desc.running { color: #e8eaf6; }
+  .step-desc.done { color: #48bb78; }
+  .step-detail { font-size: 0.72rem; color: #8892b0; margin-top: 0.15rem; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .log {
+    margin-top: 1rem; max-height: 200px; overflow-y: auto;
+    font-family: 'SF Mono', Menlo, monospace; font-size: 0.72rem;
+    background: rgba(0,0,0,0.3); border-radius: 8px; padding: 0.8rem;
+    color: #8892b0;
+  }
+  .log div { margin-bottom: 0.2rem; }
+  .log .timestamp { color: #4a5568; }
+  .success-msg {
+    text-align: center; padding: 1.5rem; color: #48bb78;
+  }
+  .success-msg h2 { font-size: 1.4rem; margin-bottom: 0.5rem; }
+  .success-msg p { color: #8892b0; font-size: 0.85rem; }
+  .error-msg { color: #f56565; text-align: center; padding: 1rem; }
+  .hidden { display: none; }
+  .router-badge {
+    display: inline-block; background: rgba(247,147,26,0.15); color: #f7931a;
+    padding: 2px 8px; border-radius: 6px; font-size: 0.72rem; font-weight: 600;
+    margin-left: 0.5rem;
+  }
+  .radio-group { display: flex; gap: 0.5rem; margin-bottom: 0.5rem; }
+  .radio-card {
+    flex: 1; padding: 12px; border: 1px solid rgba(255,255,255,0.15);
+    border-radius: 10px; cursor: pointer; text-align: center; font-size: 0.85rem;
+    transition: border-color 0.2s, background 0.2s;
+  }
+  .radio-card:hover { border-color: #f7931a; }
+  .radio-card.selected { border-color: #f7931a; background: rgba(247,147,26,0.1); color: #f7931a; }
+</style>
+</head>
+<body>
+<div class="container">
+  <div class="logo">
+    <h1>net<span>4sats</span></h1>
+    <p>Bitcoin WiFi — Setup your router in 60 seconds</p>
+  </div>
+
+  <!-- Scan View -->
+  <div id="scan-view" class="card">
+    <div class="scanning">
+      <div class="spinner"></div>
+      <p>Scanning for routers on your network...</p>
+    </div>
+  </div>
+
+  <!-- Select View -->
+  <div id="select-view" class="card hidden">
+    <div class="field">
+      <label>Select your router</label>
+      <select id="router-select"></select>
+    </div>
+    <div class="field">
+      <label>Router password</label>
+      <input type="password" id="password" placeholder="Enter router admin password" autocomplete="off">
+    </div>
+    <div class="field">
+      <label>Upstream connection</label>
+      <div class="radio-group">
+        <div class="radio-card selected" id="mode-wan" onclick="selectMode('wan')">WAN (Ethernet)</div>
+        <div class="radio-card" id="mode-sta" onclick="selectMode('sta')">WiFi Repeater</div>
+      </div>
+    </div>
+    <div id="sta-fields" class="hidden">
+      <div class="field">
+        <label>Upstream WiFi SSID</label>
+        <input type="text" id="ssid" placeholder="Enter upstream WiFi name">
+      </div>
+      <div class="field">
+        <label>Upstream WiFi password</label>
+        <input type="password" id="wifi-pass" placeholder="Enter upstream WiFi password">
+      </div>
+    </div>
+    <div class="field">
+      <label>Lightning address (optional)</label>
+      <input type="text" id="lnurl" placeholder="you@wallet.app">
+    </div>
+    <button class="btn" id="deploy-btn" onclick="startDeploy()">Deploy net4sats</button>
+    <button class="btn btn-secondary" onclick="scanAgain()">Scan again</button>
+  </div>
+
+  <!-- Deploy View -->
+  <div id="deploy-view" class="card hidden">
+    <h3 style="font-size:1rem;margin-bottom:1rem;">Deploying net4sats...</h3>
+    <div class="steps" id="steps-list"></div>
+    <div class="log hidden" id="deploy-log"></div>
+  </div>
+
+  <!-- Success View -->
+  <div id="success-view" class="card hidden">
+    <div class="success-msg">
+      <h2>net4sats is live!</h2>
+      <p>Your router is now a Bitcoin WiFi hotspot.</p>
+      <p style="margin-top:0.5rem;">Connect to the WiFi network and open any website to see the payment portal.</p>
+    </div>
+  </div>
+
+  <!-- Error View -->
+  <div id="error-view" class="card hidden">
+    <div class="error-msg">
+      <h2>Setup failed</h2>
+      <p id="error-detail" style="margin-top:0.5rem;"></p>
+      <button class="btn" style="margin-top:1rem;" onclick="location.reload()">Try again</button>
+    </div>
+  </div>
+</div>
+
+<script>
+let detectedRouters = [];
+let pollTimer = null;
+let upstreamMode = 'wan';
+
+function selectMode(mode) {
+  upstreamMode = mode;
+  document.getElementById('mode-wan').classList.toggle('selected', mode === 'wan');
+  document.getElementById('mode-sta').classList.toggle('selected', mode === 'sta');
+  document.getElementById('sta-fields').classList.toggle('hidden', mode !== 'sta');
+}
+
+async function scan() {
+  document.getElementById('scan-view').classList.remove('hidden');
+  document.getElementById('select-view').classList.add('hidden');
+
+  try {
+    const resp = await fetch('/api/scan');
+    const data = await resp.json();
+    detectedRouters = data.routers || [];
+
+    if (detectedRouters.length === 0) {
+      document.querySelector('#scan-view .scanning p').textContent =
+        'No routers found. Make sure your router is powered on and connected.';
+      return;
+    }
+
+    showSelectView();
+  } catch (e) {
+    document.querySelector('#scan-view .scanning p').textContent =
+      'Scan failed. Check that the wizard can reach your network.';
+  }
+}
+
+function showSelectView() {
+  document.getElementById('scan-view').classList.add('hidden');
+  const selectView = document.getElementById('select-view');
+  selectView.classList.remove('hidden');
+
+  const select = document.getElementById('router-select');
+  select.innerHTML = '';
+  detectedRouters.forEach(r => {
+    const label = r.ip + ' \u2014 ' + r.vendor + ' ' + r.model;
+    const opt = document.createElement('option');
+    opt.value = r.ip;
+    opt.textContent = label;
+    select.appendChild(opt);
+  });
+}
+
+function scanAgain() {
+  scan();
+}
+
+async function startDeploy() {
+  const ip = document.getElementById('router-select').value;
+  const password = document.getElementById('password').value;
+
+  if (!ip || !password) return;
+
+  document.getElementById('select-view').classList.add('hidden');
+  document.getElementById('deploy-view').classList.remove('hidden');
+
+  const body = {
+    ip: ip,
+    password: password,
+    mode: upstreamMode,
+    ssid: document.getElementById('ssid').value,
+    wifiPass: document.getElementById('wifi-pass').value,
+    lnurl: document.getElementById('lnurl').value,
+  };
+
+  const resp = await fetch('/api/deploy', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = await resp.json();
+
+  if (data.error) {
+    showError(data.error);
+    return;
+  }
+
+  pollTimer = setInterval(() => pollStatus(data.job_id), 1000);
+}
+
+async function pollStatus(jobId) {
+  const resp = await fetch('/api/status/' + jobId);
+  const job = await resp.json();
+
+  const stepsList = document.getElementById('steps-list');
+  stepsList.innerHTML = '';
+  job.steps.forEach(step => {
+    const div = document.createElement('div');
+    const icon = step.status === 'done' ? '\u2713' : step.status === 'running' ? '\u25CF' : step.status === 'failed' ? '\u2717' : '\u25CB';
+    div.innerHTML =
+      '<div class="step">' +
+      '<span class="step-icon ' + step.status + '">' + icon + '</span>' +
+      '<div class="step-desc ' + step.status + '">' + step.desc +
+      (step.detail ? '<div class="step-detail">' + step.detail + '</div>' : '') +
+      '</div></div>';
+    stepsList.appendChild(div);
+  });
+
+  if (job.log && job.log.length > 0) {
+    const logEl = document.getElementById('deploy-log');
+    logEl.classList.remove('hidden');
+    logEl.innerHTML = job.log.slice(-8).map(l =>
+      '<div><span class="timestamp">' + new Date(l.time * 1000).toLocaleTimeString() +
+      '</span> ' + l.msg + '</div>'
+    ).join('');
+  }
+
+  if (job.status === 'done') {
+    clearInterval(pollTimer);
+    setTimeout(() => {
+      document.getElementById('deploy-view').classList.add('hidden');
+      document.getElementById('success-view').classList.remove('hidden');
+    }, 1500);
+  } else if (job.status === 'failed') {
+    clearInterval(pollTimer);
+    setTimeout(() => {
+      document.getElementById('deploy-view').classList.add('hidden');
+      document.getElementById('error-detail').textContent = job.error || 'Unknown error. Check the log above.';
+      document.getElementById('error-view').classList.remove('hidden');
+    }, 1500);
+  }
+}
+
+scan();
+</script>
+</body>
+</html>
