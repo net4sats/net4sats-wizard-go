@@ -118,26 +118,34 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 4: Install tollgate
+	// Step 4: Install tollgate (skip download if already installed)
 	job.setStep(4, "running", "")
-	job.addLog("Downloading tollgate...")
-	dlOut := sshRun(client, "wget -q -O /tmp/tollgate.apk '"+tollgateAPKURL+"' && echo 'downloaded' || echo 'download failed'")
-	if strings.Contains(dlOut, "downloaded") {
-		job.addLog("Installing tollgate...")
-		installOut := sshRun(client, "apk add --allow-untrusted /tmp/tollgate.apk 2>&1 | tail -5")
-		job.addLog("Tollgate installed: " + truncate(installOut, 80))
-		job.setStep(4, "done", "tollgate-wrt installed")
+	checkOut := sshRun(client, "apk list --installed 2>/dev/null | grep tollgate-wrt || opkg list-installed 2>/dev/null | grep tollgate-wrt || echo 'not-installed'")
+	if strings.Contains(checkOut, "tollgate-wrt") {
+		job.addLog("Tollgate already installed: " + truncate(strings.TrimSpace(checkOut), 60))
+		job.setStep(4, "done", "tollgate-wrt already installed")
 	} else {
-		job.addLog("Tollgate download failed — may already be installed")
-		job.setStep(4, "done", "download failed (may be pre-installed)")
+		job.addLog("Downloading tollgate...")
+		dlOut := sshRun(client, "wget -q -O /tmp/tollgate.apk '"+tollgateAPKURL+"' && echo 'downloaded' || echo 'download failed'")
+		if strings.Contains(dlOut, "downloaded") {
+			job.addLog("Installing tollgate...")
+			installOut := sshRun(client, "apk add --allow-untrusted /tmp/tollgate.apk 2>&1 | tail -5")
+			job.addLog("Tollgate installed: " + truncate(installOut, 80))
+			job.setStep(4, "done", "tollgate-wrt installed")
+		} else {
+			job.addLog("Tollgate download failed — installing from feed")
+			feedOut := sshRun(client, "apk add tollgate-wrt 2>&1 | tail -5 || opkg install tollgate-wrt 2>&1 | tail -5")
+			job.addLog("Feed install: " + truncate(feedOut, 80))
+			job.setStep(4, "done", "tollgate-wrt via feed")
+		}
 	}
 	time.Sleep(500 * time.Millisecond)
 
 	// Step 5: Install configurationwizzard portal
 	job.setStep(5, "running", "")
 	job.addLog("Installing net4sats portal...")
-	dlOut = sshRun(client, "wget -q -O /tmp/cw.ipk '"+cwIPKURL+"' && echo 'downloaded'")
-	if strings.Contains(dlOut, "downloaded") {
+	cwDl := sshRun(client, "wget -q -O /tmp/cw.ipk '"+cwIPKURL+"' && echo 'downloaded'")
+	if strings.Contains(cwDl, "downloaded") {
 		extractOut := sshRun(client, "cd /tmp && tar xzf cw.ipk 2>/dev/null && tar xzf data.tar.gz -C / 2>/dev/null && echo 'extracted'")
 		if strings.Contains(extractOut, "extracted") {
 			job.addLog("Portal installed")
