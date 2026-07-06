@@ -31,6 +31,8 @@
   select:focus, input:focus { border-color: #f7931a; }
   select option { background: #1a1f3a; }
   .field { margin-bottom: 1.2rem; }
+  .hint { font-size: 0.72rem; color: #8892b0; margin-top: 0.35rem; }
+  .req { color: #f7931a; }
   .btn {
     width: 100%; padding: 14px; font-size: 1rem; font-weight: 700;
     border: none; border-radius: 10px; cursor: pointer;
@@ -116,11 +118,11 @@
   <div id="select-view" class="card hidden">
     <div class="field">
       <label>Select your router</label>
-      <select id="router-select"></select>
+      <select id="router-select" onchange="checkReady()"></select>
     </div>
     <div class="field">
       <label>Router password</label>
-      <input type="password" id="password" placeholder="Enter router admin password" autocomplete="off">
+      <input type="password" id="password" placeholder="Enter router admin password" autocomplete="off" oninput="checkReady()">
     </div>
     <div class="field">
       <label>Upstream connection</label>
@@ -140,10 +142,11 @@
       </div>
     </div>
     <div class="field">
-      <label>Lightning address (optional)</label>
-      <input type="text" id="lnurl" placeholder="you@wallet.app">
+      <label>Lightning address <span class="req">*</span></label>
+      <input type="text" id="lnurl" placeholder="you@wallet.app" oninput="checkReady()">
+      <div class="hint">What Lightning address should payments go to? (required)</div>
     </div>
-    <button class="btn" id="deploy-btn" onclick="startDeploy()">Deploy net4sats</button>
+    <button class="btn" id="deploy-btn" onclick="startDeploy()" disabled>Deploy net4sats</button>
     <button class="btn btn-secondary" onclick="scanAgain()">Scan again</button>
   </div>
 
@@ -221,17 +224,31 @@ function showSelectView() {
     opt.textContent = label;
     select.appendChild(opt);
   });
+  checkReady();
 }
 
 function scanAgain() {
   scan();
 }
 
+function validLightning(ln) {
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ln.trim());
+}
+
+function checkReady() {
+  const ip = document.getElementById('router-select').value;
+  const password = document.getElementById('password').value;
+  const ln = document.getElementById('lnurl').value;
+  document.getElementById('deploy-btn').disabled =
+    !(ip && password && validLightning(ln));
+}
+
 async function startDeploy() {
   const ip = document.getElementById('router-select').value;
   const password = document.getElementById('password').value;
+  const lnurl = document.getElementById('lnurl').value.trim();
 
-  if (!ip || !password) return;
+  if (!ip || !password || !validLightning(lnurl)) return;
 
   document.getElementById('select-view').classList.add('hidden');
   document.getElementById('deploy-view').classList.remove('hidden');
@@ -242,7 +259,7 @@ async function startDeploy() {
     mode: upstreamMode,
     ssid: document.getElementById('ssid').value,
     wifiPass: document.getElementById('wifi-pass').value,
-    lnurl: document.getElementById('lnurl').value,
+    lnurl: lnurl,
   };
 
   const resp = await fetch('/api/deploy', {

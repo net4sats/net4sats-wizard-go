@@ -9,9 +9,22 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"regexp"
+	"strings"
 	"sync"
 	"time"
 )
+
+var lnAddrRe = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+
+// validLightningAddress reports whether s is a plausible Lightning/LNURL
+// address (email-shaped: localpart@domain.tld). The Lightning address is a
+// required MVP field — payouts route here, so an empty/invalid value would
+// silently send payments nowhere. The check is intentionally lenient about
+// the domain; actual resolution happens at payout time on the router.
+func validLightningAddress(s string) bool {
+	return lnAddrRe.MatchString(strings.TrimSpace(s))
+}
 
 const listenAddr = ":8099"
 
@@ -97,6 +110,10 @@ func handleDeploy(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IP == "" || req.Password == "" {
 		writeError(w, 400, "IP and password required")
+		return
+	}
+	if !validLightningAddress(req.LNURL) {
+		writeError(w, 400, "a valid Lightning address is required")
 		return
 	}
 
