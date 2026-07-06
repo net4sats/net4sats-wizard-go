@@ -1,6 +1,7 @@
 package main
 
 import (
+	"strconv"
 	"strings"
 	"time"
 )
@@ -174,20 +175,29 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 7: Configure Lightning address
+	// Step 7: Configure tollgate config.json — Lightning address + advanced defaults.
+	// config.json keys (lnurl/devSplit/margin/mint) follow tollgate-module-basic-go's
+	// schema. If config.json is absent (tollgate not yet installed), we skip gracefully.
 	job.setStep(7, "running", "")
-	if req.LNURL != "" {
-		lnurlCmd := "jq --arg ln '" + req.LNURL + "' '.lnurl = $ln' /etc/tollgate/config.json > /tmp/cfg.tmp && mv /tmp/cfg.tmp /etc/tollgate/config.json 2>&1 && echo 'lnurl set' || echo 'no config'"
-		lnurlOut := sshRun(client, lnurlCmd)
-		if strings.Contains(lnurlOut, "lnurl set") {
-			job.addLog("Lightning address configured: " + req.LNURL)
-			job.setStep(7, "done", "LNURL: "+req.LNURL)
-		} else {
-			job.addLog("Config update skipped — no config.json found")
-			job.setStep(7, "done", "skipped (no config.json)")
-		}
+	devSplit := clamp(req.DevSplit, 0, 50)
+	margin := clamp(req.Margin, 0, 100)
+	mint := strings.TrimSpace(req.Mint)
+	if mint == "" {
+		mint = "https://8333.space/"
+	}
+	cfgCmd := "jq --arg ln '" + req.LNURL + "' " +
+		"--argjson ds " + strconv.Itoa(devSplit) + " " +
+		"--argjson m " + strconv.Itoa(margin) + " " +
+		"--arg mint '" + mint + "' " +
+		"'.lnurl=$ln | .devSplit=$ds | .margin=$m | .mint=$mint' " +
+		"/etc/tollgate/config.json > /tmp/cfg.tmp && mv /tmp/cfg.tmp /etc/tollgate/config.json 2>&1 && echo 'config written' || echo 'no config'"
+	cfgOut := sshRun(client, cfgCmd)
+	if strings.Contains(cfgOut, "config written") {
+		job.addLog("config.json updated (lnurl=" + req.LNURL + ", devSplit=" + strconv.Itoa(devSplit) + "%, margin=" + strconv.Itoa(margin) + "%, mint=" + truncate(mint, 30) + ")")
+		job.setStep(7, "done", "LNURL: "+req.LNURL)
 	} else {
-		job.setStep(7, "done", "skipped (no LNURL)")
+		job.addLog("Config update skipped — no config.json found")
+		job.setStep(7, "done", "skipped (no config.json)")
 	}
 	time.Sleep(500 * time.Millisecond)
 
@@ -223,4 +233,17 @@ func truncate(s string, maxLen int) string {
 		return s[:maxLen] + "..."
 	}
 	return s
+}
+
+// clamp returns n constrained to the inclusive range [lo, hi]. Used to keep
+// the advanced defaults (devSplit, margin) within safe bounds regardless of
+// what the client sends.
+func clamp(n, lo, hi int) int {
+	if n < lo {
+		return lo
+	}
+	if n > hi {
+		return hi
+	}
+	return n
 }

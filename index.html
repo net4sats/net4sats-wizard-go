@@ -97,6 +97,37 @@
   }
   .radio-card:hover { border-color: #f7931a; }
   .radio-card.selected { border-color: #f7931a; background: rgba(247,147,26,0.1); color: #f7931a; }
+  /* Advanced settings collapsible */
+  .advanced {
+    margin: 1rem 0; border: 1px solid rgba(255,255,255,0.1);
+    border-radius: 10px; padding: 0.6rem 1rem;
+  }
+  .advanced > summary {
+    font-size: 0.82rem; color: #8892b0; cursor: pointer; font-weight: 600;
+    list-style: none; user-select: none;
+  }
+  .advanced > summary::-webkit-details-marker { display: none; }
+  .advanced > summary::before { content: '▸ '; color: #f7931a; }
+  .advanced[open] > summary::before { content: '▾ '; }
+  .advanced[open] { padding-bottom: 0.4rem; }
+  .range-val { color: #f7931a; font-weight: 700; float: right; }
+  input[type=range] {
+    width: 100%; padding: 0; border: none; background: transparent;
+    -webkit-appearance: none; appearance: none; height: 6px;
+    border-radius: 3px; outline: none;
+  }
+  input[type=range] {
+    background: linear-gradient(to right, rgba(247,147,26,0.5), rgba(255,255,255,0.15));
+  }
+  input[type=range]::-webkit-slider-thumb {
+    -webkit-appearance: none; appearance: none;
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #f7931a; cursor: pointer; border: none;
+  }
+  input[type=range]::-moz-range-thumb {
+    width: 18px; height: 18px; border-radius: 50%;
+    background: #f7931a; cursor: pointer; border: none;
+  }
 </style>
 </head>
 <body>
@@ -143,9 +174,35 @@
     </div>
     <div class="field">
       <label>Lightning address <span class="req">*</span></label>
-      <input type="text" id="lnurl" placeholder="you@wallet.app" oninput="checkReady()">
-      <div class="hint">What Lightning address should payments go to? (required)</div>
+      <input type="text" id="lnurl" placeholder="you@wallet.app  or  lnurl1..." oninput="checkReady()">
+      <div class="hint">Lightning address (you@wallet.app) or raw LNURL (lnurl1...). Required.</div>
     </div>
+
+    <details class="advanced">
+      <summary>Advanced settings (optional)</summary>
+      <div class="field">
+        <label>Dev split <span class="range-val" id="devsplit-val">10%</span></label>
+        <input type="range" id="devsplit" min="0" max="50" value="10"
+               oninput="document.getElementById('devsplit-val').textContent=this.value+'%'">
+        <div class="hint">Share of payments routed to the net4sats developer fund. Default 10%.</div>
+      </div>
+      <div class="field">
+        <label>Margin <span class="range-val" id="margin-val">0%</span></label>
+        <input type="range" id="margin" min="0" max="100" value="0"
+               oninput="document.getElementById('margin-val').textContent=this.value+'%'">
+        <div class="hint">Operator markup added on top of data costs. Default 0%.</div>
+      </div>
+      <div class="field">
+        <label>Cashu mint preference</label>
+        <select id="mint">
+          <option value="https://8333.space/">8333.space (default)</option>
+          <option value="https://legend.lnbits.com/cashu/api/v1/">LNbits Legend</option>
+          <option value="https://minibits.cash/cashu/api/v1/">Minibits</option>
+        </select>
+        <div class="hint">Which Cashu mint the router should prefer for ecash payments.</div>
+      </div>
+    </details>
+
     <button class="btn" id="deploy-btn" onclick="startDeploy()" disabled>Deploy net4sats</button>
     <button class="btn btn-secondary" onclick="scanAgain()">Scan again</button>
   </div>
@@ -232,7 +289,10 @@ function scanAgain() {
 }
 
 function validLightning(ln) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ln.trim());
+  ln = ln.trim();
+  // Accept either an email-shaped Lightning address OR a raw bech32 LNURL.
+  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(ln)
+      || /^lnurl1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{6,}$/.test(ln);
 }
 
 function checkReady() {
@@ -260,6 +320,9 @@ async function startDeploy() {
     ssid: document.getElementById('ssid').value,
     wifiPass: document.getElementById('wifi-pass').value,
     lnurl: lnurl,
+    devSplit: parseInt(document.getElementById('devsplit').value, 10),
+    margin: parseInt(document.getElementById('margin').value, 10),
+    mint: document.getElementById('mint').value,
   };
 
   const resp = await fetch('/api/deploy', {

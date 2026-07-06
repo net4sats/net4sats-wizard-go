@@ -15,15 +15,25 @@ import (
 	"time"
 )
 
-var lnAddrRe = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+var (
+	lnAddrRe = regexp.MustCompile(`^[^\s@]+@[^\s@]+\.[^\s@]+$`)
+	// lnurlRe matches a raw LNURL: the "lnurl1" bech32 separator followed by
+	// at least 6 lowercase bech32 data characters (covers the 6-char checksum).
+	// Real LNURLs are far longer; this is a lenient plausibility gate.
+	lnurlRe = regexp.MustCompile(`^lnurl1[qpzry9x8gf2tvdw0s3jn54khce6mua7l]{6,}$`)
+)
 
-// validLightningAddress reports whether s is a plausible Lightning/LNURL
-// address (email-shaped: localpart@domain.tld). The Lightning address is a
-// required MVP field — payouts route here, so an empty/invalid value would
-// silently send payments nowhere. The check is intentionally lenient about
-// the domain; actual resolution happens at payout time on the router.
+// validLightningAddress reports whether s is a plausible Lightning payout
+// target. Two forms are accepted:
+//  1. Lightning address — email-shaped: localpart@domain.tld
+//  2. Raw LNURL — bech32-encoded: lnurl1<data>
+//
+// The Lightning target is a required MVP field — payouts route here, so an
+// empty/invalid value would silently send payments nowhere. The check is
+// intentionally lenient; actual resolution happens at payout time on the router.
 func validLightningAddress(s string) bool {
-	return lnAddrRe.MatchString(strings.TrimSpace(s))
+	s = strings.TrimSpace(s)
+	return lnAddrRe.MatchString(s) || lnurlRe.MatchString(s)
 }
 
 const listenAddr = ":8099"
@@ -99,7 +109,10 @@ type deployRequest struct {
 	Mode     string `json:"mode"`     // wan | sta
 	SSID     string `json:"ssid"`     // for sta mode
 	WifiPass string `json:"wifiPass"` // for sta mode
-	LNURL    string `json:"lnurl"`    // Lightning address
+	LNURL    string `json:"lnurl"`    // Lightning address or raw LNURL
+	DevSplit int    `json:"devSplit"` // advanced: % to dev fund (0-50, default 10)
+	Margin   int    `json:"margin"`   // advanced: operator markup % (0-100, default 0)
+	Mint     string `json:"mint"`     // advanced: preferred Cashu mint URL
 }
 
 func handleDeploy(w http.ResponseWriter, r *http.Request) {
