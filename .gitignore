@@ -1,3 +1,4 @@
 dist/
 *.exe
 net4sats-wizard-*
+coverage*.out
