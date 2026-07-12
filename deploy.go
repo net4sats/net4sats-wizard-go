@@ -7,8 +7,7 @@ import (
 )
 
 const (
-	tollgateAPKURL = "https://blossom.primal.net/1fcc1635a7d94a005ff270c4a44f49fb9c56b05a7fbfe01eabcba40e8d31571d.apk"
-	cwIPKURL       = "https://github.com/net4sats/configurationwizzard/releases/download/net4sats-portal-3e05134/configurationwizzard.ipk"
+	net4satsPackage = "net4sats"
 )
 
 // deploySteps returns the ordered deployment step definitions.
@@ -18,8 +17,7 @@ func deploySteps() []Step {
 		{Name: "firmware", Desc: "Checking firmware version...", Status: "pending"},
 		{Name: "password", Desc: "Setting root password...", Status: "pending"},
 		{Name: "upstream", Desc: "Configuring upstream connection...", Status: "pending"},
-		{Name: "tollgate", Desc: "Installing tollgate payment backend...", Status: "pending"},
-		{Name: "portal", Desc: "Installing net4sats portal...", Status: "pending"},
+		{Name: "install", Desc: "Installing net4sats package...", Status: "pending"},
 		{Name: "brand", Desc: "Branding captive portal as net4sats...", Status: "pending"},
 		{Name: "lnurl", Desc: "Configuring Lightning address...", Status: "pending"},
 		{Name: "services", Desc: "Restarting services...", Status: "pending"},
@@ -118,50 +116,16 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 4: Install tollgate (skip download if already installed)
+	// Step 4: Install net4sats package
 	job.setStep(4, "running", "")
-	checkOut := sshRun(client, "apk list --installed 2>/dev/null | grep tollgate-wrt || opkg list-installed 2>/dev/null | grep tollgate-wrt || echo 'not-installed'")
-	if strings.Contains(checkOut, "tollgate-wrt") {
-		job.addLog("Tollgate already installed: " + truncate(strings.TrimSpace(checkOut), 60))
-		job.setStep(4, "done", "tollgate-wrt already installed")
-	} else {
-		job.addLog("Downloading tollgate...")
-		dlOut := sshRun(client, "wget -q -O /tmp/tollgate.apk '"+tollgateAPKURL+"' && echo 'downloaded' || echo 'download failed'")
-		if strings.Contains(dlOut, "downloaded") {
-			job.addLog("Installing tollgate...")
-			installOut := sshRun(client, "apk add --allow-untrusted /tmp/tollgate.apk 2>&1 | tail -5")
-			job.addLog("Tollgate installed: " + truncate(installOut, 80))
-			job.setStep(4, "done", "tollgate-wrt installed")
-		} else {
-			job.addLog("Tollgate download failed — installing from feed")
-			feedOut := sshRun(client, "apk add tollgate-wrt 2>&1 | tail -5 || opkg install tollgate-wrt 2>&1 | tail -5")
-			job.addLog("Feed install: " + truncate(feedOut, 80))
-			job.setStep(4, "done", "tollgate-wrt via feed")
-		}
-	}
+	job.addLog("Installing net4sats package...")
+	installOut := sshRun(client, "apk update && apk add "+net4satsPackage+" 2>&1 | tail -5")
+	job.addLog("Package installed: " + truncate(installOut, 80))
+	job.setStep(4, "done", net4satsPackage+" installed")
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 5: Install configurationwizzard portal
+	// Step 5: Brand captive portal
 	job.setStep(5, "running", "")
-	job.addLog("Installing net4sats portal...")
-	cwDl := sshRun(client, "wget -q -O /tmp/cw.ipk '"+cwIPKURL+"' && echo 'downloaded'")
-	if strings.Contains(cwDl, "downloaded") {
-		extractOut := sshRun(client, "cd /tmp && tar xzf cw.ipk 2>/dev/null && tar xzf data.tar.gz -C / 2>/dev/null && echo 'extracted'")
-		if strings.Contains(extractOut, "extracted") {
-			job.addLog("Portal installed")
-			job.setStep(5, "done", "configurationwizzard installed")
-		} else {
-			job.addLog("Portal extraction had issues")
-			job.setStep(5, "done", "extracted (may have warnings)")
-		}
-	} else {
-		job.addLog("Portal download failed — may already be installed")
-		job.setStep(5, "done", "download failed (may be pre-installed)")
-	}
-	time.Sleep(500 * time.Millisecond)
-
-	// Step 6: Brand captive portal
-	job.setStep(6, "running", "")
 	job.addLog("Branding as net4sats...")
 	brandOut := sshRun(client, strings.Join([]string{
 		"uci -q set nodogsplash.@nodogsplash[0].gatewayname='net4sats'",
@@ -176,17 +140,17 @@ func runDeployment(job *Job, req deployRequest) {
 	}, " && "))
 	if strings.Contains(brandOut, "branded") {
 		job.addLog("Captive portal branded as net4sats")
-		job.setStep(6, "done", "gatewayname=net4sats")
+		job.setStep(5, "done", "gatewayname=net4sats")
 	} else {
 		job.addLog("Branding applied")
-		job.setStep(6, "done", "configured")
+		job.setStep(5, "done", "configured")
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 7: Configure tollgate config.json — Lightning address + advanced defaults.
+	// Step 6: Configure tollgate config.json — Lightning address + advanced defaults.
 	// config.json keys (lnurl/devSplit/margin/mint) follow tollgate-module-basic-go's
 	// schema. If config.json is absent (tollgate not yet installed), we skip gracefully.
-	job.setStep(7, "running", "")
+	job.setStep(6, "running", "")
 	devSplit := clamp(req.DevSplit, 0, 50)
 	margin := clamp(req.Margin, 0, 100)
 	mint := strings.TrimSpace(req.Mint)
@@ -202,7 +166,7 @@ func runDeployment(job *Job, req deployRequest) {
 	cfgOut := sshRun(client, cfgCmd)
 	if strings.Contains(cfgOut, "config written") {
 		job.addLog("config.json updated (lnurl=" + req.LNURL + ", devSplit=" + strconv.Itoa(devSplit) + "%, margin=" + strconv.Itoa(margin) + "%, mint=" + truncate(mint, 30) + ")")
-		job.setStep(7, "done", "LNURL: "+req.LNURL)
+		job.setStep(6, "done", "LNURL: "+req.LNURL)
 	} else {
 		job.addLog("Config update skipped — no config.json found")
 		job.setStep(7, "done", "skipped (no config.json)")
