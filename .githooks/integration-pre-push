@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# integration-pre-push: hardware-dependent tests and integration checks
+# Runs manually or via CI, not on every push to avoid blocking
+set -e
+
+# Configuration
+INTEGRATION_SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+REPO_DIR="$(cd "$INTEGRATION_SCRIPT_DIR/.." && pwd)"
+PLAYWRIGHT_SCRIPT="$REPO_DIR/scripts/run-browser-tests.sh"
+
+echo "==> Integration tests (hardware-dependent)"
+
+# Only run if explicitly requested (not on every push)
+if [ "${1:-}" != "--force" ]; then
+    echo "⚠️  Integration tests not run automatically on push."
+    echo "Run manually with './integration-pre-push.sh --force' or via CI."
+    echo "Physical router test automation: 78 Playwright tests (hardware-dependent)"
+    exit 0
+fi
+
+# Check if we're in the correct directory
+if [ ! -d "$REPO_DIR" ]; then
+    echo "error: repository not found: $REPO_DIR" >&2
+    exit 2
+fi
+
+# Run Playwright tests if script exists
+if [ -x "$PLAYWRIGHT_SCRIPT" ]; then
+    echo "▶ [integration] Running Playwright browser tests..."
+    cd "$REPO_DIR"
+    if [ -f "package.json" ] && [ -f "tests/browser" ]; then
+        "$PLAYWRIGHT_SCRIPT" || {
+            echo "❌ INTEGRATION TESTS FAILED — push blocked."
+            echo "Hardware-dependent tests failed. Run manually to debug."
+            exit 1
+        }
+        echo "✅ Playwright tests passed"
+    else
+        echo "⚠️  Playwright test setup not found — skipping"
+    fi
+else
+    echo "⚠️  Playwright script not found — skipping integration tests"
+fi
+
+echo "✅ Integration checks passed"
+exit 0

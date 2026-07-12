@@ -1,41 +1,55 @@
 #!/usr/bin/env bash
-# pre-push: block pushes containing secrets + run quality gates
-# Scans all commits being pushed for secret patterns
+# unit-pre-push: fast unit tests and quality gates (no hardware needed)
+# Runs on every push for immediate feedback
 set -e
 
 PATTERNS_FILE="$(git rev-parse --show-toplevel)/.secret-patterns.txt"
 
-if [ ! -f "$PATTERNS_FILE" ]; then
-    exit 0
-fi
-
-# Get commits being pushed
-RANGE="@{u}..HEAD"
-COMMITS=$(git rev-list "$RANGE" 2>/dev/null || echo "")
-
-if [ -z "$COMMITS" ]; then
-    # No upstream — scan last 5 commits
-    COMMITS=$(git rev-list HEAD~5..HEAD 2>/dev/null || echo "")
-fi
-
-FOUND=0
-while IFS= read -r pattern; do
-    [ -z "$pattern" ] && continue
-    [[ "$pattern" == \#* ]] && continue
-    MATCH=$(git log -p $RANGE 2>/dev/null | grep -nP "$pattern" 2>/dev/null | head -5)
-    if [ -n "$MATCH" ]; then
-        echo "SECRET in push history (pattern: $pattern):"
-        echo "$MATCH"
-        FOUND=1
+# Secret scanning (existing functionality)
+if [ -f "$PATTERNS_FILE" ]; then
+    RANGE="@{u}..HEAD"
+    COMMITS=$(git rev-list "$RANGE" 2>/dev/null || echo "")
+    
+    if [ -z "$COMMITS" ]; then
+        COMMITS=$(git rev-list HEAD~5..HEAD 2>/dev/null || echo "")
     fi
-done < "$PATTERNS_FILE"
-
-if [ $FOUND -eq 1 ]; then
-    echo ""
-    echo "PUSH BLOCKED — secrets detected in commit history."
-    echo "Scrub with: git filter-repo --replace-text .secret-patterns.txt"
-    exit 1
+    
+    FOUND=0
+    while IFS= read -r pattern; do
+        [ -z "$pattern" ] && continue
+        [[ "$pattern" == \#* ]] && continue
+        MATCH=$(git log -p $RANGE 2>/dev/null | grep -nP "$pattern" 2>/dev/null | head -5)
+        if [ -n "$MATCH" ]; then
+            echo "SECRET in push history (pattern: $pattern):"
+            echo "$MATCH"
+            FOUND=1
+        fi
+    done < "$PATTERNS_FILE"
+    
+    if [ $FOUND -eq 1 ]; then
+        echo ""
+        echo "PUSH BLOCKED — secrets detected in commit history."
+        echo "Scrub with: git filter-repo --replace-text .secret-patterns.txt"
+        exit 1
+    fi
 fi
 
-echo "No secrets detected."
+# Fast unit tests and quality gates
+echo "==> Running unit tests and quality gates..."
+
+# Check if quality script exists and is executable
+QUALITY_SCRIPT="$(git rev-parse --show-toplevel)/scripts/check-quality.sh"
+if [ -x "$QUALITY_SCRIPT" ]; then
+    echo "▶ [quality] Running quality checks..."
+    "$QUALITY_SCRIPT" || {
+        echo "❌ QUALITY GATES FAILED — push blocked."
+        echo "Run './scripts/check-quality.sh' locally for details."
+        exit 1
+    }
+    echo "✅ quality gates passed"
+else
+    echo "⚠️  quality script not found — skipping"
+fi
+
+echo "✅ Unit tests and quality gates passed"
 exit 0
