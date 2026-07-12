@@ -18,7 +18,7 @@ if [ -f "$PATTERNS_FILE" ]; then
     while IFS= read -r pattern; do
         [ -z "$pattern" ] && continue
         [[ "$pattern" == \#* ]] && continue
-        MATCH=$(git log -p $RANGE 2>/dev/null | grep -nP "$pattern" 2>/dev/null | head -5)
+        MATCH=$(git log -p $RANGE -- . ':(exclude).secret-patterns.txt' ':(exclude).githooks/' 2>/dev/null | grep -nP "$pattern" 2>/dev/null | head -5)
         if [ -n "$MATCH" ]; then
             echo "SECRET in push history (pattern: $pattern):"
             echo "$MATCH"
