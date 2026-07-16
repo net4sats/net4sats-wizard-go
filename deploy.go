@@ -147,63 +147,69 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 6: Configure tollgate — Lightning address goes to identities.json,
-	// other settings stay in config.json.
-	// tollgate-module-basic-go reads lightning_address from
-	// identities.json → public_identities[].lightning_address (NOT from config.json).
-	// We set the "owner" identity's lightning_address to the user-provided LNURL.
+	// Step 6: Configure Lightning address + advanced defaults.
+	// lightning_address goes into identities.json → public_identities[].lightning_address
+	// (per tollgate-module-basic-go's schema — it reads ONLY from identities.json,
+	// never from config.json). margin and profit_share factors go into config.json.
 	// If files are absent (tollgate not yet installed), we skip gracefully.
 	job.setStep(6, "running", "")
+
+	// 6a: Write lightning_address to identities.json (owner identity).
+	lnCmd := "jq --arg la '" + req.LNURL + "' " +
+		"'(.public_identities[] | select(.name == \"owner\") | .lightning_address) = $la' " +
+		"/etc/tollgate/identities.json > /tmp/ident.tmp 2>&1 && " +
+		"mv /tmp/ident.tmp /etc/tollgate/identities.json && echo 'identities updated' || echo 'no identities'"
+	lnOut := sshRun(client, lnCmd)
+
+	// 6b: Write margin + profit_share to config.json.
 	devSplit := clamp(req.DevSplit, 0, 50)
 	margin := clamp(req.Margin, 0, 100)
-	mint := strings.TrimSpace(req.Mint)
-	if mint == "" {
-		mint = "https://8333.space/"
-	}
-	// LNURL → identities.json (owner's lightning_address)
-	identCmd := "jq --arg ln '" + req.LNURL + "' " +
-		"'(.public_identities[] | select(.name == \"owner\")).lightning_address = $ln' " +
-		"/etc/tollgate/identities.json > /tmp/ident.tmp && mv /tmp/ident.tmp /etc/tollgate/identities.json 2>&1 && echo 'identities written' || echo 'no identities'"
-	identOut := sshRun(client, identCmd)
-	if strings.Contains(identOut, "identities written") {
-		job.addLog("identities.json updated (owner lightning_address=" + req.LNURL + ")")
-	} else {
-		job.addLog("identities.json update skipped — file not found")
-	}
-	// devSplit/margin/mint stay in config.json
-	cfgCmd := "jq --argjson ds " + strconv.Itoa(devSplit) + " " +
-		"--argjson m " + strconv.Itoa(margin) + " " +
-		"--arg mint '" + mint + "' " +
-		"'.devSplit=$ds | .margin=$m | .mint=$mint' " +
-		"/etc/tollgate/config.json > /tmp/cfg.tmp && mv /tmp/cfg.tmp /etc/tollgate/config.json 2>&1 && echo 'config written' || echo 'no config'"
+	ownerFactor := strconv.FormatFloat(1.0-float64(devSplit)/100.0, 'f', 4, 64)
+	devFactor := strconv.FormatFloat(float64(devSplit)/100.0, 'f', 4, 64)
+	cfgCmd := "jq --argjson m " + strconv.Itoa(margin) + " " +
+		"--argjson of " + ownerFactor + " " +
+		"--argjson df " + devFactor + " " +
+		"'.margin=$m | " +
+		"(.profit_share[] | select(.identity == \"owner\") | .factor) = $of | " +
+		"(.profit_share[] | select(.identity == \"developer\") | .factor) = $df' " +
+		"/etc/tollgate/config.json > /tmp/cfg.tmp 2>&1 && " +
+		"mv /tmp/cfg.tmp /etc/tollgate/config.json && echo 'config updated' || echo 'no config'"
 	cfgOut := sshRun(client, cfgCmd)
-	if strings.Contains(cfgOut, "config written") {
-		job.addLog("config.json updated (devSplit=" + strconv.Itoa(devSplit) + "%, margin=" + strconv.Itoa(margin) + "%, mint=" + truncate(mint, 30) + ")")
+
+	if strings.Contains(lnOut, "identities updated") {
+		job.addLog("identities.json: lightning_address=" + req.LNURL + " for owner")
+	}
+	if strings.Contains(cfgOut, "config updated") {
+		job.addLog("config.json: margin=" + strconv.Itoa(margin) + "%, devSplit=" + strconv.Itoa(devSplit) + "% (profit_share updated)")
+	}
+	if strings.Contains(lnOut, "identities updated") || strings.Contains(cfgOut, "config updated") {
 		job.setStep(6, "done", "LNURL: "+req.LNURL)
 	} else {
-		job.addLog("Config update skipped — no config.json found")
-		job.setStep(7, "done", "skipped (no config.json)")
+		job.addLog("Config update skipped — no tollgate files found")
+		job.addLog("identities: " + truncate(lnOut, 60))
+		job.addLog("config: " + truncate(cfgOut, 60))
+		job.setStep(6, "done", "skipped (no tollgate config)")
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 8: Restart services
-	job.setStep(8, "running", "")
+	// Step 7: Restart services
+	job.setStep(7, "running", "")
 	job.addLog("Restarting services...")
 	svcOut := sshRun(client, "/etc/init.d/tollgate-wrt restart 2>&1; /etc/init.d/nodogsplash restart 2>&1; sleep 2; echo 'services restarted'")
 	job.addLog("Services restarted: " + truncate(svcOut, 60))
-	job.setStep(8, "done", "tollgate-wrt + nodogsplash restarted")
+	job.setStep(7, "done", "tollgate-wrt + nodogsplash restarted")
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 9: Health check
-	job.setStep(9, "running", "")
+	// Step 8: Health check
+	job.setStep(8, "running", "")
 	job.addLog("Running health check...")
 	healthOut := sshRun(client, "wget -qO- http://127.0.0.1:2121/ 2>/dev/null | head -c 100 || echo 'health check failed'")
 	if strings.Contains(healthOut, "kind") || strings.Contains(healthOut, "metric") || strings.Contains(healthOut, "pubkey") {
 		job.addLog("Health check passed — TollGate API responding")
-		job.setStep(9, "done", "API healthy on :2121")
+		job.setStep(8, "done", "API healthy on :2121")
 	} else {
 		job.addLog("Health check: " + truncate(healthOut, 80))
-		job.setStep(9, "done", "checked")
+		job.setStep(8, "done", "checked")
 	}
 
 	job.mu.Lock()
