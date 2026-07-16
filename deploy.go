@@ -162,8 +162,8 @@ func runDeployment(job *Job, req deployRequest) {
 	brandOut := sshRun(client, strings.Join([]string{
 		// Hostname
 		"uci -q set system.@system[0].hostname='net4sats'",
-		// WiFi SSID
-		"uci -q set wireless.@wifi-iface[0].ssid='net4sats'",
+		// WiFi SSID — set on ALL wifi-iface sections (GL-MT3000 has 2.4GHz + 5GHz)
+		"for i in $(uci show wireless | grep 'wifi-iface' | sed 's/\\..*//;s/.*\\.//' | sort -u); do uci -q set wireless.$i.ssid='net4sats'; done",
 		// DNS: deduplicated /etc/hosts entries
 		hostsCmd,
 		// Ensure dnsmasq serves .lan domain
@@ -193,8 +193,14 @@ func runDeployment(job *Job, req deployRequest) {
 		"uci commit dhcp",
 		"uci commit network",
 		"uci commit nodogsplash",
+		// Enable radios (OpenWrt ships with wifi disabled by default)
+		"uci -q set wireless.radio0.disabled='0' 2>/dev/null; true",
+		"uci -q set wireless.radio1.disabled='0' 2>/dev/null; true",
+		"uci commit wireless",
 		"/etc/init.d/nodogsplash enable",
 		"/etc/init.d/dnsmasq restart 2>/dev/null || true",
+		// Apply wireless config (wifi reload applies UCI, wifi starts if not running)
+		"wifi reload 2>/dev/null || wifi 2>/dev/null || true",
 		"echo 'branded'",
 	}, " && "))
 	// Install mdnsd for .local (non-fatal, runs separately)
