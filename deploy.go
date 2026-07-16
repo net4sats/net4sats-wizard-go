@@ -142,23 +142,42 @@ func runDeployment(job *Job, req deployRequest) {
 	// Step 5: Brand as net4sats — hostname, SSID, DNS, nodogsplash config
 	job.setStep(5, "running", "")
 	job.addLog("Branding as net4sats...")
+
+	// Get router LAN IP first (needed for DNS entries)
+	routerIP := sshRun(client, "uci -q get network.lan.ipaddr 2>/dev/null | tr -d \"'\" | awk '{print $1}'")
+	routerIP = strings.TrimSpace(routerIP)
+	if routerIP == "" {
+		routerIP = "192.168.1.1"
+	}
+	job.addLog("Router LAN IP: " + routerIP)
+
+	// Deduplicate /etc/hosts entries, then write fresh ones
+	hostsCmd := "sed -i '/tollgate\\.lan/d; /net4sats\\.lan/d; /tollgate\\.local/d; /net4sats\\.local/d' /etc/hosts && " +
+		"echo '" + routerIP + " tollgate.lan net4sats.lan tollgate.local net4sats.local' >> /etc/hosts"
+
+	// Try to install mdnsd for .local mDNS support (non-fatal if unavailable)
+	mdnsCmd := "opkg update >/dev/null 2>&1 && opkg install mdnsd >/dev/null 2>&1 && /etc/init.d/mdnsd enable 2>/dev/null; /etc/init.d/mdnsd start 2>/dev/null; echo ok"
+
 	brandOut := sshRun(client, strings.Join([]string{
 		// Hostname
 		"uci -q set system.@system[0].hostname='net4sats'",
 		// WiFi SSID
 		"uci -q set wireless.@wifi-iface[0].ssid='net4sats'",
-		// DNS: add tollgate.lan and net4sats.lan → router IP
-		"echo '$(uci get network.lan.ipaddr 2>/dev/null || echo 192.168.1.1) tollgate.lan net4sats.lan' >> /etc/hosts",
+		// DNS: deduplicated /etc/hosts entries
+		hostsCmd,
 		// Ensure dnsmasq serves .lan domain
 		"uci -q set dhcp.@dnsmasq[0].domain='lan'",
 		"uci -q set dhcp.@dnsmasq[0].local='/lan/'",
+		// dnsmasq address records (belt-and-suspenders with /etc/hosts)
+		"uci -q del_list dhcp.@dnsmasq[0].address='/tollgate.lan/" + routerIP + "' 2>/dev/null; uci -q add_list dhcp.@dnsmasq[0].address='/tollgate.lan/" + routerIP + "'",
+		"uci -q del_list dhcp.@dnsmasq[0].address='/net4sats.lan/" + routerIP + "' 2>/dev/null; uci -q add_list dhcp.@dnsmasq[0].address='/net4sats.lan/" + routerIP + "'",
 		// NoDogSplash config
 		"uci -q set nodogsplash.@nodogsplash[0].gatewayname='net4sats'",
 		"uci -q set nodogsplash.@nodogsplash[0].enabled='1'",
 		"uci -q set nodogsplash.@nodogsplash[0].clientid='mac'",
-		"uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121'",
-		"uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2050'",
-		"uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 80'",
+		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121'",
+		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2050' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2050'",
+		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 80' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 80'",
 		// Commit all
 		"uci commit system",
 		"uci commit wireless",
@@ -168,6 +187,13 @@ func runDeployment(job *Job, req deployRequest) {
 		"/etc/init.d/dnsmasq restart 2>/dev/null || true",
 		"echo 'branded'",
 	}, " && "))
+	// Install mdnsd for .local (non-fatal, runs separately)
+	mdnsOut := sshRun(client, mdnsCmd)
+	if strings.Contains(mdnsOut, "ok") {
+		job.addLog("mDNS (.local) support: mdnsd installed/enabled")
+	} else {
+		job.addLog("mDNS (.local) support: not available (opkg may not have mdnsd)")
+	}
 	if strings.Contains(brandOut, "branded") {
 		job.addLog("Branded: hostname=net4sats, SSID=net4sats, DNS=tollgate.lan+net4sats.lan")
 		job.setStep(5, "done", "hostname+SSID+DNS+nodogsplash")
