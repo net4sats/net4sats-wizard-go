@@ -193,8 +193,9 @@ func runDeployment(job *Job, req deployRequest) {
 	brandOut := sshRun(client, strings.Join([]string{
 		// Hostname
 		"uci -q set system.@system[0].hostname='" + nodeName + "'",
-		// WiFi SSID — set on ALL wifi-iface sections (GL-MT3000 has 2.4GHz + 5GHz)
-		"for i in $(uci show wireless | grep 'wifi-iface' | sed 's/\\..*//;s/.*\\.//' | sort -u); do uci -q set wireless.$i.ssid='" + nodeName + "'; done",
+		// WiFi SSID — only on default_radio* (public captive portal WiFi)
+		// Skip private_radio* (admin LAN) and *_uplink (WAN repeater)
+		"for i in $(uci -q show wireless 2>/dev/null | grep 'default_radio.*=wifi-iface' | awk -F. '{print $2}' | awk -F= '{print $1}'); do uci -q set wireless.$i.ssid='" + nodeName + "'; done",
 		// DNS: deduplicated /etc/hosts entries
 		hostsCmd,
 		// Ensure dnsmasq serves .lan domain
