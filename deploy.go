@@ -147,7 +147,7 @@ func runDeployment(job *Job, req deployRequest) {
 	routerIP := sshRun(client, "uci -q get network.lan.ipaddr 2>/dev/null | tr -d \"'\" | awk '{print $1}'")
 	routerIP = strings.TrimSpace(routerIP)
 	if routerIP == "" {
-		routerIP = "192.168.1.1"
+		routerIP = "192.168.8.1"
 	}
 	job.addLog("Router LAN IP: " + routerIP)
 
@@ -171,6 +171,14 @@ func runDeployment(job *Job, req deployRequest) {
 		// dnsmasq address records (belt-and-suspenders with /etc/hosts)
 		"uci -q del_list dhcp.@dnsmasq[0].address='/tollgate.lan/" + routerIP + "' 2>/dev/null; uci -q add_list dhcp.@dnsmasq[0].address='/tollgate.lan/" + routerIP + "'",
 		"uci -q del_list dhcp.@dnsmasq[0].address='/net4sats.lan/" + routerIP + "' 2>/dev/null; uci -q add_list dhcp.@dnsmasq[0].address='/net4sats.lan/" + routerIP + "'",
+		// DHCP: push router as DNS server to all DHCP clients (option 6)
+		// This is what makes .lan domains resolve on connected devices
+		"uci -q del_list dhcp.lan.dhcp_option='6," + routerIP + "' 2>/dev/null; uci -q add_list dhcp.lan.dhcp_option='6," + routerIP + "'",
+		// dnsmasq: expand /etc/hosts entries with domain suffix
+		"uci -q set dhcp.@dnsmasq[0].expandhosts='1'",
+		"uci -q set dhcp.@dnsmasq[0].readethers='1'",
+		// network: set domain on lan interface
+		"uci -q set network.lan.domain='lan'",
 		// NoDogSplash config
 		"uci -q set nodogsplash.@nodogsplash[0].gatewayname='net4sats'",
 		"uci -q set nodogsplash.@nodogsplash[0].enabled='1'",
@@ -182,6 +190,7 @@ func runDeployment(job *Job, req deployRequest) {
 		"uci commit system",
 		"uci commit wireless",
 		"uci commit dhcp",
+		"uci commit network",
 		"uci commit nodogsplash",
 		"/etc/init.d/nodogsplash enable",
 		"/etc/init.d/dnsmasq restart 2>/dev/null || true",
