@@ -13,7 +13,9 @@ const (
 	// Stable release URLs from releases.tollgate.me
 	tollgatePkgURL = "https://releases.tollgate.me/package/f0e6d2ea5c138df11b9d850d9fadbe62ea4ef95ca8a9b24348274a858824f7ab?channel=stable"
 	// Pre-built OpenWrt firmware image with tollgate pre-installed (for future firmware flash step)
-	tollgateOSURL  = "https://releases.tollgate.me/os/57e0f2468a17b8c7a84d9a2af62d1e02111a3b9bc898ec1d9183b1f7dd1db52e?channel=stable"
+	tollgateOSURL = "https://releases.tollgate.me/os/57e0f2468a17b8c7a84d9a2af62d1e02111a3b9bc898ec1d9183b1f7dd1db52e?channel=stable"
+	// Admin panel + rpcd plugin from net4sats GitHub releases
+	configwizURL = "https://github.com/net4sats/configurationwizzard/releases/download/v1.0.0/net4sats-configwiz-1.0.0.tar.gz"
 )
 
 // deploySteps returns the ordered deployment step definitions.
@@ -260,21 +262,39 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 7: Install net4sats admin panel
+	// Step 7: Install net4sats admin panel + rpcd plugin
 	job.setStep(7, "running", "")
 	job.addLog("Downloading net4sats admin panel...")
-	adminURL := "https://github.com/net4sats/configurationwizzard/releases/download/v0.5.0/net4sats-admin_1.0.0_all.ipk"
-	adminOut := sshRun(client, "wget -qO /tmp/net4sats-admin.ipk '"+adminURL+"' 2>&1 && echo 'downloaded' || echo 'download failed'")
+	adminOut := sshRun(client, "wget -qO /tmp/configwiz.tar.gz '"+configwizURL+"' 2>&1 && echo 'downloaded' || echo 'download failed'")
 	if strings.Contains(adminOut, "downloaded") {
 		job.addLog("Admin panel downloaded, installing...")
-		// Try opkg first, then apk
-		installOut := sshRun(client, "opkg install /tmp/net4sats-admin.ipk 2>&1 && echo 'opkg ok' || (apk add --allow-untrusted /tmp/net4sats-admin.ipk 2>&1 && echo 'apk ok') || echo 'install failed'")
-		if strings.Contains(installOut, "opkg ok") || strings.Contains(installOut, "apk ok") {
-			job.addLog("Admin panel installed to /www/net4sats/ (port 8090)")
-			job.setStep(7, "done", "admin panel installed")
+		installCmd := strings.Join([]string{
+			"mkdir -p /tmp/cw",
+			"tar xzf /tmp/configwiz.tar.gz -C /tmp/cw",
+			// Admin panel → /www/net4sats/
+			"mkdir -p /www/net4sats",
+			"cp -r /tmp/cw/admin/* /www/net4sats/",
+			// rpcd plugin
+			"mkdir -p /usr/libexec/rpcd /usr/share/rpcd/acl.d",
+			"cp /tmp/cw/openwrt/rpcd/tollgate /usr/libexec/rpcd/tollgate",
+			"chmod +x /usr/libexec/rpcd/tollgate",
+			"cp /tmp/cw/openwrt/rpcd/tollgate_acl.json /usr/share/rpcd/acl.d/tollgate.json",
+			// uhttpd: net4sats on port 80, LuCI on 8080
+			"cp /tmp/cw/openwrt/files/etc/config/uhttpd_net4sats /etc/config/uhttpd_net4sats",
+			// Restart services
+			"/etc/init.d/rpcd restart 2>/dev/null || true",
+			"/etc/init.d/uhttpd restart 2>/dev/null || true",
+			// Cleanup
+			"rm -rf /tmp/cw /tmp/configwiz.tar.gz",
+			"echo 'admin installed'",
+		}, " && ")
+		installOut := sshRun(client, installCmd)
+		if strings.Contains(installOut, "admin installed") {
+			job.addLog("Admin panel installed: /www/net4sats/ (port 80)")
+			job.setStep(7, "done", "admin panel + rpcd installed")
 		} else {
-			job.addLog("Install failed: " + truncate(installOut, 60))
-			job.setStep(7, "done", "install failed (downloaded)")
+			job.addLog("Install issue: " + truncate(installOut, 60))
+			job.setStep(7, "done", "install partial")
 		}
 	} else {
 		job.addLog("Download failed, skipping admin panel")
