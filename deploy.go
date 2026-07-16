@@ -257,25 +257,63 @@ func runDeployment(job *Job, req deployRequest) {
 	// Step 6: Deploy configurationwizzard captive portal to nodogsplash + uhttpd portal
 	job.setStep(6, "running", "")
 	job.addLog("Uploading configurationwizzard captive portal...")
-	// 6a: nodogsplash htdocs (port 2050, direct access)
-	err := sshDeployFS(client, portalFS, "portal", "/etc/nodogsplash/htdocs")
-	if err != nil {
-		job.addLog("Portal upload error (nodogsplash): " + truncate(err.Error(), 80))
-	} else {
-		sshRun(client, "cp /etc/nodogsplash/htdocs/splash.html /etc/nodogsplash/htdocs/index.html 2>/dev/null; true")
-		job.addLog("Portal deployed to /etc/nodogsplash/htdocs/ (port 2050)")
-	}
-	// 6b: uhttpd portal instance (port 2051, where preauth.sh redirects)
-	portalErr2 := sshDeployFS(client, portalFS, "portal", "/etc/tollgate/net4sats-captive-portal-site")
+	// 6a: uhttpd portal instance (port 2051) — serves full Preact SPA with JS/CSS.
+	// NDS 5.0.2 built-in HTTP server returns 500 for files >64KB (splash JS is 200KB).
+	// uhttpd handles large files fine. Portal is served from here, NDS redirects to it.
+	portalDeployDir := "/etc/tollgate/net4sats-captive-portal-site"
+	portalErr2 := sshDeployFS(client, portalFS, "portal", portalDeployDir)
 	if portalErr2 != nil {
 		job.addLog("Portal upload error (uhttpd 2051): " + truncate(portalErr2.Error(), 80))
 	} else {
-		job.addLog("Portal deployed to /etc/tollgate/net4sats-captive-portal-site/ (port 2051)")
+		job.addLog("Portal deployed to " + portalDeployDir + "/ (port 2051)")
 	}
-	if err == nil || portalErr2 == nil {
-		job.setStep(6, "done", "portal deployed to nodogsplash + uhttpd")
+
+	// 6b: NDS htdocs — replace with redirect stub (NOT the full SPA).
+	// NDS serves this as its built-in splash, but it can't serve large JS.
+	// The redirect sends clients to uhttpd :2051 where the real portal lives.
+	sshRun(client, "rm -f /etc/nodogsplash/htdocs; mkdir -p /etc/nodogsplash/htdocs")
+	redirectHTML := "<!DOCTYPE html><html><head>" +
+		"<meta http-equiv=\"refresh\" content=\"0; url=http://" + routerIP + ":2051/splash.html\">" +
+		"<script>location.replace(\"http://" + routerIP + ":2051/splash.html\");</script>" +
+		"<title>net4sats Portal</title></head><body>Redirecting...</body></html>"
+	sshWriteFile(client, "/etc/nodogsplash/htdocs/splash.html", []byte(redirectHTML))
+	sshRun(client, "cp /etc/nodogsplash/htdocs/splash.html /etc/nodogsplash/htdocs/index.html")
+	job.addLog("NDS htdocs: redirect stub installed (port 2050 → 2051)")
+
+	// 6c: NDS preauth script — ensures NDS intercepts and redirects to portal
+	preauthScript := "#!/bin/sh\n" +
+		"# NDS preauth: redirect intercepted clients to uhttpd-served portal\n" +
+		"cat << 'EOF'\n" + redirectHTML + "\nEOF\nexit 0\n"
+	sshWriteFile(client, "/etc/nodogsplash/preauth.sh", []byte(preauthScript))
+	sshRun(client, "chmod +x /etc/nodogsplash/preauth.sh")
+
+	// 6d: Configure NDS to use preauth + allow port 2051
+	sshRun(client, strings.Join([]string{
+		"uci set nodogsplash.@nodogsplash[0].preauth='/etc/nodogsplash/preauth.sh'",
+		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2051' 2>/dev/null; true",
+		"uci add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2051'",
+		"uci commit nodogsplash",
+		"echo 'nds configured'",
+	}, " && "))
+
+	// 6e: uhttpd portal section (must be in main uhttpd config, not separate file)
+	sshRun(client, strings.Join([]string{
+		"uci set uhttpd.portal=uhttpd",
+		"uci -q del_list uhttpd.portal.listen_http='0.0.0.0:2051' 2>/dev/null; true",
+		"uci add_list uhttpd.portal.listen_http='0.0.0.0:2051'",
+		"uci -q del_list uhttpd.portal.listen_http='[::]:2051' 2>/dev/null; true",
+		"uci add_list uhttpd.portal.listen_http='[::]:2051'",
+		"uci set uhttpd.portal.home='" + portalDeployDir + "'",
+		"uci set uhttpd.portal.index_page='splash.html'",
+		"uci set uhttpd.portal.max_requests='8'",
+		"uci commit uhttpd",
+		"echo 'uhttpd portal configured'",
+	}, " && "))
+
+	if portalErr2 == nil {
+		job.setStep(6, "done", "portal: uhttpd :2051 + NDS preauth redirect")
 	} else {
-		job.setStep(6, "done", "upload failed (partial)")
+		job.setStep(6, "done", "portal deployed (partial)")
 	}
 	time.Sleep(500 * time.Millisecond)
 
@@ -295,6 +333,27 @@ func runDeployment(job *Job, req deployRequest) {
 	sshRun(client, "chmod +x /usr/libexec/rpcd/tollgate")
 	sshWriteFile(client, "/usr/share/rpcd/acl.d/tollgate.json", rpcdACL)
 	job.addLog("rpcd tollgate plugin installed")
+
+	// 7b2: Patch admin JS — replace broken dhcp/ipv4leases with tollgate/clients
+	// dnsmasq 2.90 on OpenWrt 24.10 doesn't provide ubus dhcp.ipv4leases method.
+	// Our rpcd plugin's clients method parses /tmp/dhcp.leases directly.
+	sshRun(client, "for f in /www/net4sats/assets/index-*.js; do "+
+		"sed -i 's/`dhcp`,`ipv4leases`/`tollgate`,`clients`/g' \"$f\"; done")
+	job.addLog("Admin JS patched: dhcp ipv4leases → tollgate clients")
+
+	// 7b3: Deploy balance page to admin panel
+	// balance.html exists in portal FS — copy it, fix paths for admin base
+	balanceHTML := readFromEmbedFS(portalFS, "portal/balance.html")
+	if balanceHTML != nil {
+		fixed := strings.ReplaceAll(string(balanceHTML), "/assets/", "./assets/")
+		fixed = strings.ReplaceAll(fixed, "/favicon.ico", "./favicon.ico")
+		fixed = strings.ReplaceAll(fixed, "/manifest.json", "./manifest.json")
+		sshWriteFile(client, "/www/net4sats/balance.html", []byte(fixed))
+		// Copy shared vendor assets from portal to admin (balance JS/CSS + shared bundles)
+		sshRun(client, "for f in balance-*.js balance-*.css index-C9QTYeLH.js index-DoTOgCNp.css; do "+
+			"cp /etc/tollgate/net4sats-captive-portal-site/assets/$f /www/net4sats/assets/ 2>/dev/null; done; true")
+		job.addLog("Balance page deployed to admin panel")
+	}
 
 	// 7c: uhttpd config — separate instances: net4sats on :8090, luci on :8080
 	sshWriteFile(client, "/etc/config/uhttpd_net4sats", uhttpdNet4sats)
