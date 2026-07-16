@@ -7,7 +7,10 @@ import (
 )
 
 const (
+	// net4satsPackage is the apk package name.
 	net4satsPackage = "net4sats"
+	// Stable release URLs from releases.tollgate.me
+	tollgatePkgURL = "https://releases.tollgate.me/package/f0e6d2ea5c138df11b9d850d9fadbe62ea4ef95ca8a9b24348274a858824f7ab?channel=stable"
 )
 
 // deploySteps returns the ordered deployment step definitions.
@@ -116,34 +119,59 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 4: Install net4sats package
+	// Step 4: Install tollgate package (stable release from releases.tollgate.me)
 	job.setStep(4, "running", "")
-	job.addLog("Installing net4sats package...")
-	installOut := sshRun(client, "apk update && apk add "+net4satsPackage+" 2>&1 | tail -5")
-	job.addLog("Package installed: " + truncate(installOut, 80))
-	job.setStep(4, "done", net4satsPackage+" installed")
+	job.addLog("Downloading tollgate-wrt stable package...")
+	dlOut := sshRun(client, "wget -q -O /tmp/tollgate.apk '"+tollgatePkgURL+"' 2>&1 && echo 'downloaded' || echo 'download failed'")
+	if strings.Contains(dlOut, "downloaded") {
+		job.addLog("Package downloaded, installing...")
+		installOut := sshRun(client, "apk add --allow-untrusted /tmp/tollgate.apk 2>&1 | tail -5")
+		job.addLog("Package installed: " + truncate(installOut, 80))
+		job.setStep(4, "done", "tollgate-wrt installed")
+	} else {
+		// Fallback: try apk add from feeds
+		job.addLog("Direct download failed, trying apk feed...")
+		installOut := sshRun(client, "apk update && apk add "+net4satsPackage+" 2>&1 | tail -5")
+		job.addLog("Package installed: " + truncate(installOut, 80))
+		job.setStep(4, "done", net4satsPackage+" installed (feed)")
+	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 5: Brand captive portal
+	// Step 5: Brand as net4sats — hostname, SSID, DNS, nodogsplash config
 	job.setStep(5, "running", "")
 	job.addLog("Branding as net4sats...")
 	brandOut := sshRun(client, strings.Join([]string{
+		// Hostname
+		"uci -q set system.@system[0].hostname='net4sats'",
+		// WiFi SSID
+		"uci -q set wireless.@wifi-iface[0].ssid='net4sats'",
+		// DNS: add tollgate.lan and net4sats.lan → router IP
+		"echo '$(uci get network.lan.ipaddr 2>/dev/null || echo 192.168.1.1) tollgate.lan net4sats.lan' >> /etc/hosts",
+		// Ensure dnsmasq serves .lan domain
+		"uci -q set dhcp.@dnsmasq[0].domain='lan'",
+		"uci -q set dhcp.@dnsmasq[0].local='/lan/'",
+		// NoDogSplash config
 		"uci -q set nodogsplash.@nodogsplash[0].gatewayname='net4sats'",
 		"uci -q set nodogsplash.@nodogsplash[0].enabled='1'",
 		"uci -q set nodogsplash.@nodogsplash[0].clientid='mac'",
 		"uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121'",
 		"uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2050'",
 		"uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 80'",
+		// Commit all
+		"uci commit system",
+		"uci commit wireless",
+		"uci commit dhcp",
 		"uci commit nodogsplash",
 		"/etc/init.d/nodogsplash enable",
+		"/etc/init.d/dnsmasq restart 2>/dev/null || true",
 		"echo 'branded'",
 	}, " && "))
 	if strings.Contains(brandOut, "branded") {
-		job.addLog("Captive portal branded as net4sats")
-		job.setStep(5, "done", "gatewayname=net4sats")
+		job.addLog("Branded: hostname=net4sats, SSID=net4sats, DNS=tollgate.lan+net4sats.lan")
+		job.setStep(5, "done", "hostname+SSID+DNS+nodogsplash")
 	} else {
-		job.addLog("Branding applied")
-		job.setStep(5, "done", "configured")
+		job.addLog("Branding attempted: " + truncate(brandOut, 60))
+		job.setStep(5, "done", "configured (partial)")
 	}
 	time.Sleep(500 * time.Millisecond)
 
