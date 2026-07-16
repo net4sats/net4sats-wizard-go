@@ -270,19 +270,27 @@ func runDeployment(job *Job, req deployRequest) {
 		job.addLog("Admin panel upload error: " + truncate(adminErr.Error(), 60))
 		job.setStep(7, "done", "upload partial")
 	} else {
-		// Configure uhttpd to serve on port 8090 for admin panel
+		// Configure uhttpd: admin on 8090, LuCI on 8080, remove port 80 (nodogsplash owns it)
 		uhttpdOut := sshRun(client, strings.Join([]string{
-			// Add 8090 listener if not already present
-			"grep -q '8090' /etc/config/uhttpd || uci add_list uhttpd.main.listen_http='0.0.0.0:8090'",
-			// Allow /net4sats path
+			// Remove port 80 from uhttpd if present (nodogsplash owns port 80)
+			"uci -q del_list uhttpd.main.listen_http='0.0.0.0:80' 2>/dev/null; true",
+			"uci -q del_list uhttpd.main.listen_http='[::]:80' 2>/dev/null; true",
+			// Ensure LuCI on 8080
+			"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8080' 2>/dev/null; uci -q add_list uhttpd.main.listen_http='0.0.0.0:8080'",
+			// Add 8090 for admin panel
+			"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8090' 2>/dev/null; uci -q add_list uhttpd.main.listen_http='0.0.0.0:8090'",
+			// Set document root
 			"uci -q set uhttpd.main.home='/www'",
 			"uci commit uhttpd",
+			// Create /admin symlink → /net4sats for dual-path access
+			"ln -sf /www/net4sats /www/admin",
+			// Restart uhttpd
 			"/etc/init.d/uhttpd restart 2>/dev/null || true",
 			"echo 'admin deployed'",
 		}, " && "))
 		if strings.Contains(uhttpdOut, "admin deployed") {
-			job.addLog("Admin panel: /www/net4sats/ on port 8090")
-			job.setStep(7, "done", "admin panel on :8090")
+			job.addLog("Admin panel: http://tollgate.lan:8090/net4sats/ or /admin/")
+			job.setStep(7, "done", "admin on :8090 + /admin/")
 		} else {
 			job.addLog("Admin uploaded, uhttpd: " + truncate(uhttpdOut, 60))
 			job.setStep(7, "done", "deployed (uhttpd partial)")
