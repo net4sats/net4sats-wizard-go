@@ -1,9 +1,9 @@
 package main
 
 import (
+	"bytes"
 	"embed"
 	"fmt"
-	"io"
 	"net"
 	"os"
 	"path"
@@ -26,7 +26,6 @@ func sshConnect(ip, password string) *ssh.Client {
 	} else if signer := tryDefaultKeys(); signer != nil {
 		config.Auth = []ssh.AuthMethod{ssh.PublicKeys(signer)}
 	} else {
-		// No auth method available
 		return nil
 	}
 
@@ -45,6 +44,18 @@ func sshRun(client *ssh.Client, cmd string) string {
 	}
 	defer session.Close()
 	output, err := session.CombinedOutput(cmd)
+	return string(output)
+}
+
+// sshUploadPipe writes binary data to the router via SSH stdin.
+func sshUploadPipe(client *ssh.Client, data []byte, extractCmd string) string {
+	session, err := client.NewSession()
+	if err != nil {
+		return ""
+	}
+	defer session.Close()
+	session.Stdin = bytes.NewReader(data)
+	output, err := session.CombinedOutput(extractCmd)
 	return string(output)
 }
 
@@ -75,12 +86,9 @@ func sshWriteFile(client *ssh.Client, remotePath string, content []byte) error {
 }
 
 // sshDeployPortal writes the embedded portal files to the router.
-// Creates the target directory, then writes each file.
 func sshDeployPortal(client *ssh.Client, fs embed.FS, rootDir string) error {
-	// Create target directory structure
 	sshRun(client, "mkdir -p "+rootDir+"/assets "+rootDir+"/locales")
 
-	// Walk the embedded FS and write each file
 	entries, err := fs.ReadDir("portal")
 	if err != nil {
 		return fmt.Errorf("read portal embed: %w", err)
@@ -89,14 +97,14 @@ func sshDeployPortal(client *ssh.Client, fs embed.FS, rootDir string) error {
 	for _, entry := range entries {
 		fullPath := "portal/" + entry.Name()
 		if entry.IsDir() {
-			// Write directory contents
 			subEntries, err := fs.ReadDir(fullPath)
 			if err != nil {
 				continue
 			}
+			sshRun(client, "mkdir -p "+path.Join(rootDir, entry.Name()))
 			for _, sub := range subEntries {
 				if sub.IsDir() {
-					continue // Only 1 level deep
+					continue
 				}
 				data, err := fs.ReadFile(fullPath + "/" + sub.Name())
 				if err != nil {
@@ -144,6 +152,3 @@ func tryDefaultKeys() ssh.Signer {
 	}
 	return nil
 }
-
-// unused import guard for io (used indirectly through stdin pipe)
-var _ io.Writer = (*os.File)(nil)
