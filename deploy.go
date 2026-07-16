@@ -1,6 +1,7 @@
 package main
 
 import (
+	cryptorand "crypto/rand"
 	"strconv"
 	"strings"
 	"time"
@@ -142,7 +143,21 @@ func runDeployment(job *Job, req deployRequest) {
 
 	// Step 5: Brand as net4sats — hostname, SSID, DNS, nodogsplash config
 	job.setStep(5, "running", "")
-	job.addLog("Branding as net4sats...")
+	// Generate unique suffix (e.g. net4sats-a7f2) so multiple routers don't clash
+	const ssidChars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	suffix := make([]byte, 4)
+	randBytes := make([]byte, 4)
+	if _, err := cryptorand.Read(randBytes); err != nil {
+		// Fallback: time-seeded
+		for i := range randBytes {
+			randBytes[i] = byte(time.Now().UnixNano() >> uint(i*8))
+		}
+	}
+	for i := range suffix {
+		suffix[i] = ssidChars[int(randBytes[i])%len(ssidChars)]
+	}
+	nodeName := "net4sats-" + string(suffix)
+	job.addLog("Branding as " + nodeName + "...")
 
 	// Get router LAN IP first (needed for DNS entries)
 	routerIP := sshRun(client, "uci -q get network.lan.ipaddr 2>/dev/null | tr -d \"'\" | awk '{print $1}'")
@@ -161,9 +176,9 @@ func runDeployment(job *Job, req deployRequest) {
 
 	brandOut := sshRun(client, strings.Join([]string{
 		// Hostname
-		"uci -q set system.@system[0].hostname='net4sats'",
+		"uci -q set system.@system[0].hostname='" + nodeName + "'",
 		// WiFi SSID — set on ALL wifi-iface sections (GL-MT3000 has 2.4GHz + 5GHz)
-		"for i in $(uci show wireless | grep 'wifi-iface' | sed 's/\\..*//;s/.*\\.//' | sort -u); do uci -q set wireless.$i.ssid='net4sats'; done",
+		"for i in $(uci show wireless | grep 'wifi-iface' | sed 's/\\..*//;s/.*\\.//' | sort -u); do uci -q set wireless.$i.ssid='" + nodeName + "'; done",
 		// DNS: deduplicated /etc/hosts entries
 		hostsCmd,
 		// Ensure dnsmasq serves .lan domain
@@ -181,7 +196,7 @@ func runDeployment(job *Job, req deployRequest) {
 		// network: set domain on lan interface
 		"uci -q set network.lan.domain='lan'",
 		// NoDogSplash config
-		"uci -q set nodogsplash.@nodogsplash[0].gatewayname='net4sats'",
+		"uci -q set nodogsplash.@nodogsplash[0].gatewayname='" + nodeName + "'",
 		"uci -q set nodogsplash.@nodogsplash[0].enabled='1'",
 		"uci -q set nodogsplash.@nodogsplash[0].clientid='mac'",
 		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121'",
@@ -211,7 +226,7 @@ func runDeployment(job *Job, req deployRequest) {
 		job.addLog("mDNS (.local) support: not available (opkg may not have mdnsd)")
 	}
 	if strings.Contains(brandOut, "branded") {
-		job.addLog("Branded: hostname=net4sats, SSID=net4sats, DNS=tollgate.lan+net4sats.lan")
+		job.addLog("Branded: hostname=" + nodeName + ", SSID=" + nodeName + ", DNS=tollgate.lan+net4sats.lan")
 		job.setStep(5, "done", "hostname+SSID+DNS+nodogsplash")
 	} else {
 		job.addLog("Branding attempted: " + truncate(brandOut, 60))
