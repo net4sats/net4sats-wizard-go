@@ -218,6 +218,7 @@ func runDeployment(job *Job, req deployRequest) {
 		"uci -q set nodogsplash.@nodogsplash[0].clientid='mac'",
 		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121'",
 		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2050' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2050'",
+		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2051' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2051'",
 		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 80' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 80'",
 		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 8080' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 8080'",
 		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 8090' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 8090'",
@@ -253,18 +254,28 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 6: Deploy configurationwizzard captive portal to nodogsplash
+	// Step 6: Deploy configurationwizzard captive portal to nodogsplash + uhttpd portal
 	job.setStep(6, "running", "")
 	job.addLog("Uploading configurationwizzard captive portal...")
+	// 6a: nodogsplash htdocs (port 2050, direct access)
 	err := sshDeployFS(client, portalFS, "portal", "/etc/nodogsplash/htdocs")
 	if err != nil {
-		job.addLog("Portal upload error: " + truncate(err.Error(), 80))
-		job.setStep(6, "done", "upload failed (partial)")
+		job.addLog("Portal upload error (nodogsplash): " + truncate(err.Error(), 80))
 	} else {
-		// Ensure splash.html is also available as index.html for nodogsplash
 		sshRun(client, "cp /etc/nodogsplash/htdocs/splash.html /etc/nodogsplash/htdocs/index.html 2>/dev/null; true")
-		job.addLog("configurationwizzard portal deployed to /etc/nodogsplash/htdocs/")
-		job.setStep(6, "done", "portal deployed to nodogsplash")
+		job.addLog("Portal deployed to /etc/nodogsplash/htdocs/ (port 2050)")
+	}
+	// 6b: uhttpd portal instance (port 2051, where preauth.sh redirects)
+	portalErr2 := sshDeployFS(client, portalFS, "portal", "/etc/tollgate/net4sats-captive-portal-site")
+	if portalErr2 != nil {
+		job.addLog("Portal upload error (uhttpd 2051): " + truncate(portalErr2.Error(), 80))
+	} else {
+		job.addLog("Portal deployed to /etc/tollgate/net4sats-captive-portal-site/ (port 2051)")
+	}
+	if err == nil || portalErr2 == nil {
+		job.setStep(6, "done", "portal deployed to nodogsplash + uhttpd")
+	} else {
+		job.setStep(6, "done", "upload failed (partial)")
 	}
 	time.Sleep(500 * time.Millisecond)
 

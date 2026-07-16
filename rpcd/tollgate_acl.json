@@ -13,7 +13,8 @@
           "pricing",
           "sessions",
           "upstream_scan",
-          "upstream_list"
+          "upstream_list",
+          "clients"
         ],
         "system": ["info", "board"],
         "network.interface": ["dump"],

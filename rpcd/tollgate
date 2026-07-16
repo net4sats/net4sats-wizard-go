@@ -20,7 +20,8 @@ case "$1" in
       "upstream_scan":{},
       "upstream_connect":{"ssid":"string","passphrase":"string"},
       "upstream_list":{},
-      "upstream_remove":{"ssid":"string"}
+      "upstream_remove":{"ssid":"string"},
+      "clients":{}
     }'
     ;;
   call)
@@ -129,6 +130,25 @@ case "$1" in
           exit 0
         fi
         tollgate --json upstream remove "$SSID" 2>/dev/null
+        ;;
+      clients)
+        json_init
+        json_add_object "device"
+        json_add_object "br-lan"
+        json_add_array "leases"
+        NOW=$(date +%s)
+        while read -r expires mac ip hostname clientid; do
+            json_add_object ""
+            json_add_string "macaddr" "$mac"
+            json_add_string "ipaddr" "$ip"
+            [ "$hostname" = "*" ] && json_add_string "hostname" "" || json_add_string "hostname" "$hostname"
+            json_add_int "expires" $((${expires:-0} - NOW))
+            json_close_object
+        done < /tmp/dhcp.leases 2>/dev/null
+        json_close_array
+        json_close_object
+        json_close_object
+        json_dump
         ;;
       *)
         json_init
