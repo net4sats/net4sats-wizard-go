@@ -11,7 +11,7 @@ const (
 	// net4satsPackage is the apk package name.
 	net4satsPackage = "net4sats"
 	// Stable release URLs from releases.tollgate.me
-	tollgatePkgURL = "https://releases.tollgate.me/package/f0e6d2ea5c138df11b9d850d9fadbe62ea4ef95ca8a9b24348274a858824f7ab?channel=stable"
+	tollgatePkgURL = "https://github.com/OpenTollGate/tollgate-module-basic-go/releases/download/v0.5.0/tollgate-wrt_v0.5.0_aarch64_cortex-a53.ipk"
 	// Pre-built OpenWrt firmware image with tollgate pre-installed (for future firmware flash step)
 	tollgateOSURL = "https://releases.tollgate.me/os/57e0f2468a17b8c7a84d9a2af62d1e02111a3b9bc898ec1d9183b1f7dd1db52e?channel=stable"
 	// Admin panel + rpcd plugin from net4sats GitHub releases
@@ -126,20 +126,33 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 4: Install tollgate package (stable release from releases.tollgate.me)
+	// Step 4: Install tollgate package from GitHub releases
 	job.setStep(4, "running", "")
-	job.addLog("Downloading tollgate-wrt stable package...")
-	dlOut := sshRun(client, "wget -q -O /tmp/tollgate.apk '"+tollgatePkgURL+"' 2>&1 && echo 'downloaded' || echo 'download failed'")
+	job.addLog("Downloading tollgate-wrt v0.5.0 ipk...")
+	dlOut := sshRun(client, "wget -q -O /tmp/tollgate-wrt.ipk '"+tollgatePkgURL+"' 2>&1 && echo 'downloaded' || echo 'download failed'")
 	if strings.Contains(dlOut, "downloaded") {
-		job.addLog("Package downloaded, installing...")
-		installOut := sshRun(client, "apk add --allow-untrusted /tmp/tollgate.apk 2>&1 | tail -5")
+		job.addLog("Package downloaded, installing via opkg...")
+		rmLock := sshRun(client, "rm -f /var/lock/opkg.lock 2>/dev/null")
+		_ = rmLock
+		installOut := sshRun(client, "opkg install /tmp/tollgate-wrt.ipk 2>&1 | tail -5")
 		job.addLog("Package installed: " + truncate(installOut, 80))
+		// Verify the binary actually exists
+		verifyOut := sshRun(client, "ls /usr/bin/tollgate-wrt 2>/dev/null || ls /usr/sbin/tollgate-wrt 2>/dev/null || which tollgate-wrt 2>/dev/null || echo 'NOT FOUND'")
+		if strings.Contains(verifyOut, "NOT FOUND") {
+			job.addLog("WARNING: tollgate-wrt binary not found after install")
+			job.setStep(4, "error", "tollgate-wrt install failed")
+			return
+		}
 		job.setStep(4, "done", "tollgate-wrt installed")
 	} else {
-		// Fallback: try apk add from feeds
-		job.addLog("Direct download failed, trying apk feed...")
-		installOut := sshRun(client, "apk update && apk add "+net4satsPackage+" 2>&1 | tail -5")
+		job.addLog("Download failed, trying opkg feed...")
+		installOut := sshRun(client, "rm -f /var/lock/opkg.lock 2>/dev/null; opkg update >/dev/null 2>&1; opkg install "+net4satsPackage+" 2>&1 | tail -5")
 		job.addLog("Package installed: " + truncate(installOut, 80))
+		verifyOut := sshRun(client, "which tollgate-wrt 2>/dev/null || echo 'NOT FOUND'")
+		if strings.Contains(verifyOut, "NOT FOUND") {
+			job.setStep(4, "error", "tollgate-wrt install failed")
+			return
+		}
 		job.setStep(4, "done", net4satsPackage+" installed (feed)")
 	}
 	time.Sleep(500 * time.Millisecond)
@@ -239,64 +252,63 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 6: Deploy net4sats captive portal
+	// Step 6: Deploy configurationwizzard captive portal to nodogsplash
 	job.setStep(6, "running", "")
-	job.addLog("Uploading net4sats captive portal...")
-	portalDir := "/etc/tollgate/net4sats-captive-portal-site"
-	err := sshDeployPortal(client, portalFS, portalDir)
+	job.addLog("Uploading configurationwizzard captive portal...")
+	err := sshDeployFS(client, portalFS, "portal", "/etc/nodogsplash/htdocs")
 	if err != nil {
 		job.addLog("Portal upload error: " + truncate(err.Error(), 80))
 		job.setStep(6, "done", "upload failed (partial)")
 	} else {
-		// Update nodogsplash symlink to point to net4sats portal
-		symlinkOut := sshRun(client, strings.Join([]string{
-			"rm -rf /etc/nodogsplash/htdocs",
-			"ln -sf " + portalDir + " /etc/nodogsplash/htdocs",
-			"echo 'portal deployed'",
-		}, " && "))
-		if strings.Contains(symlinkOut, "portal deployed") {
-			job.addLog("net4sats captive portal deployed + symlinked")
-			job.setStep(6, "done", "portal uploaded + symlinked")
-		} else {
-			job.addLog("Portal uploaded but symlink failed: " + truncate(symlinkOut, 60))
-			job.setStep(6, "done", "uploaded (symlink failed)")
-		}
+		// Ensure splash.html is also available as index.html for nodogsplash
+		sshRun(client, "cp /etc/nodogsplash/htdocs/splash.html /etc/nodogsplash/htdocs/index.html 2>/dev/null; true")
+		job.addLog("configurationwizzard portal deployed to /etc/nodogsplash/htdocs/")
+		job.setStep(6, "done", "portal deployed to nodogsplash")
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 7: Deploy net4sats admin panel (embedded, no download needed)
+	// Step 7: Deploy admin panel + rpcd plugin + uhttpd config (matches playwright deploy-configwizzard.sh)
 	job.setStep(7, "running", "")
-	job.addLog("Deploying net4sats admin panel...")
+	job.addLog("Deploying net4sats admin panel + rpcd plugin...")
+
+	// 7a: Admin panel to /www/net4sats/
 	adminErr := sshDeployFS(client, adminFS, "admin", "/www/net4sats")
 	if adminErr != nil {
-		job.addLog("Admin panel upload error: " + truncate(adminErr.Error(), 60))
-		job.setStep(7, "done", "upload partial")
+		job.addLog("Admin upload error: " + truncate(adminErr.Error(), 60))
+	}
+
+	// 7b: rpcd plugin
+	sshRun(client, "mkdir -p /usr/libexec/rpcd /usr/share/rpcd/acl.d")
+	sshWriteFile(client, "/usr/libexec/rpcd/tollgate", rpcdTollgate)
+	sshRun(client, "chmod +x /usr/libexec/rpcd/tollgate")
+	sshWriteFile(client, "/usr/share/rpcd/acl.d/tollgate.json", rpcdACL)
+	job.addLog("rpcd tollgate plugin installed")
+
+	// 7c: uhttpd config — separate instances: net4sats on :8090, luci on :8080
+	sshWriteFile(client, "/etc/config/uhttpd_net4sats", uhttpdNet4sats)
+	// Remove conflicting listeners from main uhttpd instance
+	uhttpdOut := sshRun(client, strings.Join([]string{
+		// Remove port 80, 8080, 8090 from main uhttpd (our separate instances handle these)
+		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:80' 2>/dev/null; true",
+		"uci -q del_list uhttpd.main.listen_http='[::]:80' 2>/dev/null; true",
+		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8080' 2>/dev/null; true",
+		"uci -q del_list uhttpd.main.listen_http='[::]:8080' 2>/dev/null; true",
+		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8090' 2>/dev/null; true",
+		"uci -q del_list uhttpd.main.listen_http='[::]:8090' 2>/dev/null; true",
+		"uci commit uhttpd",
+		// Restart rpcd to pick up new plugin
+		"/etc/init.d/rpcd restart 2>/dev/null || true",
+		// Restart uhttpd to pick up new config
+		"/etc/init.d/uhttpd restart 2>/dev/null || true",
+		"echo 'admin deployed'",
+	}, " && "))
+
+	if strings.Contains(uhttpdOut, "admin deployed") {
+		job.addLog("Admin: http://tollgate.lan:8090/ | LuCI: http://tollgate.lan:8080/")
+		job.setStep(7, "done", "admin+:8090, rpcd, uhttpd")
 	} else {
-		// Configure uhttpd: admin on 8090, LuCI on 8080, remove port 80 (nodogsplash owns it)
-		uhttpdOut := sshRun(client, strings.Join([]string{
-			// Remove port 80 from uhttpd if present (nodogsplash owns port 80)
-			"uci -q del_list uhttpd.main.listen_http='0.0.0.0:80' 2>/dev/null; true",
-			"uci -q del_list uhttpd.main.listen_http='[::]:80' 2>/dev/null; true",
-			// Ensure LuCI on 8080
-			"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8080' 2>/dev/null; uci -q add_list uhttpd.main.listen_http='0.0.0.0:8080'",
-			// Add 8090 for admin panel
-			"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8090' 2>/dev/null; uci -q add_list uhttpd.main.listen_http='0.0.0.0:8090'",
-			// Set document root
-			"uci -q set uhttpd.main.home='/www'",
-			"uci commit uhttpd",
-			// Create /admin symlink → /net4sats for dual-path access
-			"ln -sf /www/net4sats /www/admin",
-			// Restart uhttpd
-			"/etc/init.d/uhttpd restart 2>/dev/null || true",
-			"echo 'admin deployed'",
-		}, " && "))
-		if strings.Contains(uhttpdOut, "admin deployed") {
-			job.addLog("Admin panel: http://tollgate.lan:8090/net4sats/ or /admin/")
-			job.setStep(7, "done", "admin on :8090 + /admin/")
-		} else {
-			job.addLog("Admin uploaded, uhttpd: " + truncate(uhttpdOut, 60))
-			job.setStep(7, "done", "deployed (uhttpd partial)")
-		}
+		job.addLog("uhttpd: " + truncate(uhttpdOut, 60))
+		job.setStep(7, "done", "deployed (partial)")
 	}
 	time.Sleep(500 * time.Millisecond)
 
@@ -348,9 +360,23 @@ func runDeployment(job *Job, req deployRequest) {
 	// Step 9: Restart services
 	job.setStep(9, "running", "")
 	job.addLog("Restarting services...")
-	svcOut := sshRun(client, "/etc/init.d/tollgate-wrt restart 2>&1; /etc/init.d/nodogsplash restart 2>&1; sleep 2; echo 'services restarted'")
+	// Verify tollgate-wrt init script exists before restart
+	initCheck := sshRun(client, "ls /etc/init.d/tollgate-wrt 2>/dev/null && echo 'exists' || echo 'missing'")
+	if strings.Contains(initCheck, "missing") {
+		job.addLog("ERROR: tollgate-wrt init script not found — package install failed")
+		job.setStep(9, "error", "tollgate-wrt not installed")
+		return
+	}
+	svcOut := sshRun(client, strings.Join([]string{
+		"/etc/init.d/rpcd restart 2>&1",
+		"/etc/init.d/tollgate-wrt restart 2>&1",
+		"/etc/init.d/nodogsplash restart 2>&1",
+		"/etc/init.d/uhttpd restart 2>&1",
+		"sleep 3",
+		"echo 'services restarted'",
+	}, "; "))
 	job.addLog("Services restarted: " + truncate(svcOut, 60))
-	job.setStep(9, "done", "tollgate-wrt + nodogsplash restarted")
+	job.setStep(9, "done", "rpcd+tollgate-wrt+nodogsplash+uhttpd")
 	time.Sleep(500 * time.Millisecond)
 
 	// Step 10: Health check
@@ -359,10 +385,25 @@ func runDeployment(job *Job, req deployRequest) {
 	healthOut := sshRun(client, "wget -qO- http://127.0.0.1:2121/ 2>/dev/null | head -c 100 || echo 'health check failed'")
 	if strings.Contains(healthOut, "kind") || strings.Contains(healthOut, "metric") || strings.Contains(healthOut, "pubkey") {
 		job.addLog("Health check passed — TollGate API responding")
+		// Also verify rpcd tollgate plugin responds
+		rpcdOut := sshRun(client, "ubus list tollgate 2>/dev/null && echo 'rpcd ok' || echo 'rpcd missing'")
+		if strings.Contains(rpcdOut, "rpcd ok") {
+			job.addLog("rpcd tollgate plugin: OK")
+		} else {
+			job.addLog("WARNING: rpcd tollgate plugin not responding")
+		}
+		// Verify admin panel serving on 8090
+		adminOut := sshRun(client, "netstat -tlnp 2>/dev/null | grep 8090 && echo 'admin ok' || echo 'admin missing'")
+		if strings.Contains(adminOut, "admin ok") {
+			job.addLog("Admin panel on :8090: OK")
+		} else {
+			job.addLog("WARNING: admin panel not serving on 8090")
+		}
 		job.setStep(10, "done", "API healthy on :2121")
 	} else {
-		job.addLog("Health check: " + truncate(healthOut, 80))
-		job.setStep(10, "done", "checked")
+		job.addLog("Health check FAILED: " + truncate(healthOut, 80))
+		job.setStep(10, "error", "tollgate API not responding on :2121")
+		return
 	}
 
 	job.mu.Lock()
