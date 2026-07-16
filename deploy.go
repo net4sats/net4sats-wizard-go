@@ -11,6 +11,8 @@ const (
 	net4satsPackage = "net4sats"
 	// Stable release URLs from releases.tollgate.me
 	tollgatePkgURL = "https://releases.tollgate.me/package/f0e6d2ea5c138df11b9d850d9fadbe62ea4ef95ca8a9b24348274a858824f7ab?channel=stable"
+	// Pre-built OpenWrt firmware image with tollgate pre-installed (for future firmware flash step)
+	tollgateOSURL  = "https://releases.tollgate.me/os/57e0f2468a17b8c7a84d9a2af62d1e02111a3b9bc898ec1d9183b1f7dd1db52e?channel=stable"
 )
 
 // deploySteps returns the ordered deployment step definitions.
