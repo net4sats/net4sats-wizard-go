@@ -4,9 +4,10 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"io/fs"
+	"path"
 	"net"
 	"os"
-	"path"
 	"time"
 
 	"golang.org/x/crypto/ssh"
@@ -128,6 +129,37 @@ func sshDeployPortal(client *ssh.Client, fs embed.FS, rootDir string) error {
 	}
 
 	return nil
+}
+
+// sshDeployFS recursively deploys an embedded FS to a remote directory.
+// Works with arbitrary nesting depth (e.g. assets/icon/colour/).
+func sshDeployFS(client *ssh.Client, fsys embed.FS, embedRoot string, remoteDir string) error {
+	sshRun(client, "mkdir -p "+remoteDir)
+
+	return fs.WalkDir(fsys, embedRoot, func(fullPath string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return nil // skip errors
+		}
+		// Compute relative path (embed paths always use /)
+		relPath := fullPath
+		prefix := embedRoot + "/"
+		if len(fullPath) > len(prefix) && fullPath[:len(prefix)] == prefix {
+			relPath = fullPath[len(prefix):]
+		}
+		if relPath == "" || relPath == embedRoot {
+			return nil
+		}
+		if d.IsDir() {
+			sshRun(client, "mkdir -p "+path.Join(remoteDir, relPath))
+			return nil
+		}
+		data, err := fsys.ReadFile(fullPath)
+		if err != nil {
+			return nil
+		}
+		remotePath := path.Join(remoteDir, relPath)
+		return sshWriteFile(client, remotePath, data)
+	})
 }
 
 // tryDefaultKeys attempts to load the default SSH key.

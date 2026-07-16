@@ -262,43 +262,31 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 7: Install net4sats admin panel + rpcd plugin
+	// Step 7: Deploy net4sats admin panel (embedded, no download needed)
 	job.setStep(7, "running", "")
-	job.addLog("Downloading net4sats admin panel...")
-	adminOut := sshRun(client, "wget -qO /tmp/configwiz.tar.gz '"+configwizURL+"' 2>&1 && echo 'downloaded' || echo 'download failed'")
-	if strings.Contains(adminOut, "downloaded") {
-		job.addLog("Admin panel downloaded, installing...")
-		installCmd := strings.Join([]string{
-			"mkdir -p /tmp/cw",
-			"tar xzf /tmp/configwiz.tar.gz -C /tmp/cw",
-			// Admin panel → /www/net4sats/
-			"mkdir -p /www/net4sats",
-			"cp -r /tmp/cw/admin/* /www/net4sats/",
-			// rpcd plugin
-			"mkdir -p /usr/libexec/rpcd /usr/share/rpcd/acl.d",
-			"cp /tmp/cw/openwrt/rpcd/tollgate /usr/libexec/rpcd/tollgate",
-			"chmod +x /usr/libexec/rpcd/tollgate",
-			"cp /tmp/cw/openwrt/rpcd/tollgate_acl.json /usr/share/rpcd/acl.d/tollgate.json",
-			// uhttpd: net4sats on port 80, LuCI on 8080
-			"cp /tmp/cw/openwrt/files/etc/config/uhttpd_net4sats /etc/config/uhttpd_net4sats",
-			// Restart services
-			"/etc/init.d/rpcd restart 2>/dev/null || true",
-			"/etc/init.d/uhttpd restart 2>/dev/null || true",
-			// Cleanup
-			"rm -rf /tmp/cw /tmp/configwiz.tar.gz",
-			"echo 'admin installed'",
-		}, " && ")
-		installOut := sshRun(client, installCmd)
-		if strings.Contains(installOut, "admin installed") {
-			job.addLog("Admin panel installed: /www/net4sats/ (port 80)")
-			job.setStep(7, "done", "admin panel + rpcd installed")
-		} else {
-			job.addLog("Install issue: " + truncate(installOut, 60))
-			job.setStep(7, "done", "install partial")
-		}
+	job.addLog("Deploying net4sats admin panel...")
+	adminErr := sshDeployFS(client, adminFS, "admin", "/www/net4sats")
+	if adminErr != nil {
+		job.addLog("Admin panel upload error: " + truncate(adminErr.Error(), 60))
+		job.setStep(7, "done", "upload partial")
 	} else {
-		job.addLog("Download failed, skipping admin panel")
-		job.setStep(7, "done", "skipped (download failed)")
+		// Configure uhttpd to serve on port 8090 for admin panel
+		uhttpdOut := sshRun(client, strings.Join([]string{
+			// Add 8090 listener if not already present
+			"grep -q '8090' /etc/config/uhttpd || uci add_list uhttpd.main.listen_http='0.0.0.0:8090'",
+			// Allow /net4sats path
+			"uci -q set uhttpd.main.home='/www'",
+			"uci commit uhttpd",
+			"/etc/init.d/uhttpd restart 2>/dev/null || true",
+			"echo 'admin deployed'",
+		}, " && "))
+		if strings.Contains(uhttpdOut, "admin deployed") {
+			job.addLog("Admin panel: /www/net4sats/ on port 8090")
+			job.setStep(7, "done", "admin panel on :8090")
+		} else {
+			job.addLog("Admin uploaded, uhttpd: " + truncate(uhttpdOut, 60))
+			job.setStep(7, "done", "deployed (uhttpd partial)")
+		}
 	}
 	time.Sleep(500 * time.Millisecond)
 
