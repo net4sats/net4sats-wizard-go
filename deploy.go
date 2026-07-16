@@ -24,6 +24,7 @@ func deploySteps() []Step {
 		{Name: "upstream", Desc: "Configuring upstream connection...", Status: "pending"},
 		{Name: "install", Desc: "Installing net4sats package...", Status: "pending"},
 		{Name: "brand", Desc: "Branding captive portal as net4sats...", Status: "pending"},
+		{Name: "portal", Desc: "Deploying net4sats captive portal...", Status: "pending"},
 		{Name: "lnurl", Desc: "Configuring Lightning address...", Status: "pending"},
 		{Name: "services", Desc: "Restarting services...", Status: "pending"},
 		{Name: "health", Desc: "Running health check...", Status: "pending"},
@@ -212,21 +213,46 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 6: Configure Lightning address + advanced defaults.
+	// Step 6: Deploy net4sats captive portal
+	job.setStep(6, "running", "")
+	job.addLog("Uploading net4sats captive portal...")
+	portalDir := "/etc/tollgate/net4sats-captive-portal-site"
+	err := sshDeployPortal(client, portalFS, portalDir)
+	if err != nil {
+		job.addLog("Portal upload error: " + truncate(err.Error(), 80))
+		job.setStep(6, "done", "upload failed (partial)")
+	} else {
+		// Update nodogsplash symlink to point to net4sats portal
+		symlinkOut := sshRun(client, strings.Join([]string{
+			"rm -rf /etc/nodogsplash/htdocs",
+			"ln -sf " + portalDir + " /etc/nodogsplash/htdocs",
+			"echo 'portal deployed'",
+		}, " && "))
+		if strings.Contains(symlinkOut, "portal deployed") {
+			job.addLog("net4sats captive portal deployed + symlinked")
+			job.setStep(6, "done", "portal uploaded + symlinked")
+		} else {
+			job.addLog("Portal uploaded but symlink failed: " + truncate(symlinkOut, 60))
+			job.setStep(6, "done", "uploaded (symlink failed)")
+		}
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// Step 7: Configure Lightning address + advanced defaults.
 	// lightning_address goes into identities.json → public_identities[].lightning_address
 	// (per tollgate-module-basic-go's schema — it reads ONLY from identities.json,
 	// never from config.json). margin and profit_share factors go into config.json.
 	// If files are absent (tollgate not yet installed), we skip gracefully.
-	job.setStep(6, "running", "")
+	job.setStep(7, "running", "")
 
-	// 6a: Write lightning_address to identities.json (owner identity).
+	// 7a: Write lightning_address to identities.json (owner identity).
 	lnCmd := "jq --arg la '" + req.LNURL + "' " +
 		"'(.public_identities[] | select(.name == \"owner\") | .lightning_address) = $la' " +
 		"/etc/tollgate/identities.json > /tmp/ident.tmp 2>&1 && " +
 		"mv /tmp/ident.tmp /etc/tollgate/identities.json && echo 'identities updated' || echo 'no identities'"
 	lnOut := sshRun(client, lnCmd)
 
-	// 6b: Write margin + profit_share to config.json.
+	// 7b: Write margin + profit_share to config.json.
 	devSplit := clamp(req.DevSplit, 0, 50)
 	margin := clamp(req.Margin, 0, 100)
 	ownerFactor := strconv.FormatFloat(1.0-float64(devSplit)/100.0, 'f', 4, 64)
@@ -257,24 +283,24 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 7: Restart services
-	job.setStep(7, "running", "")
+	// Step 8: Restart services
+	job.setStep(8, "running", "")
 	job.addLog("Restarting services...")
 	svcOut := sshRun(client, "/etc/init.d/tollgate-wrt restart 2>&1; /etc/init.d/nodogsplash restart 2>&1; sleep 2; echo 'services restarted'")
 	job.addLog("Services restarted: " + truncate(svcOut, 60))
-	job.setStep(7, "done", "tollgate-wrt + nodogsplash restarted")
+	job.setStep(8, "done", "tollgate-wrt + nodogsplash restarted")
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 8: Health check
-	job.setStep(8, "running", "")
+	// Step 9: Health check
+	job.setStep(9, "running", "")
 	job.addLog("Running health check...")
 	healthOut := sshRun(client, "wget -qO- http://127.0.0.1:2121/ 2>/dev/null | head -c 100 || echo 'health check failed'")
 	if strings.Contains(healthOut, "kind") || strings.Contains(healthOut, "metric") || strings.Contains(healthOut, "pubkey") {
 		job.addLog("Health check passed — TollGate API responding")
-		job.setStep(8, "done", "API healthy on :2121")
+		job.setStep(9, "done", "API healthy on :2121")
 	} else {
 		job.addLog("Health check: " + truncate(healthOut, 80))
-		job.setStep(8, "done", "checked")
+		job.setStep(9, "done", "checked")
 	}
 
 	job.mu.Lock()

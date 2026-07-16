@@ -1,0 +1,30 @@
+{
+  "assets": {
+    "js": [
+      "assets/balance-DJQwiWcn.js",
+      "assets/browser-ponyfill-5QirI38A.js",
+      "assets/index-C9QTYeLH.js",
+      "assets/portal-lmusZhKv.js",
+      "assets/qr-scanner-worker.min-D85Z9gVD.js"
+    ],
+    "css": [
+      "assets/balance-BDKJNKNY.css",
+      "assets/index-DoTOgCNp.css"
+    ],
+    "images": [
+      "assets/net4sats-logo-white-Cz-Q_tgh.png",
+      "favicon.ico"
+    ],
+    "locales": [
+      "locales/en.json"
+    ],
+    "html": [
+      "404.html",
+      "balance.html",
+      "splash.html"
+    ],
+    "manifest": [
+      "manifest.json"
+    ]
+  }
+}
