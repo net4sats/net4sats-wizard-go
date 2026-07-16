@@ -26,6 +26,7 @@ func deploySteps() []Step {
 		{Name: "install", Desc: "Installing net4sats package...", Status: "pending"},
 		{Name: "brand", Desc: "Branding captive portal as net4sats...", Status: "pending"},
 		{Name: "portal", Desc: "Deploying net4sats captive portal...", Status: "pending"},
+		{Name: "admin", Desc: "Installing net4sats admin panel...", Status: "pending"},
 		{Name: "lnurl", Desc: "Configuring Lightning address...", Status: "pending"},
 		{Name: "services", Desc: "Restarting services...", Status: "pending"},
 		{Name: "health", Desc: "Running health check...", Status: "pending"},
@@ -259,21 +260,43 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 7: Configure Lightning address + advanced defaults.
+	// Step 7: Install net4sats admin panel
+	job.setStep(7, "running", "")
+	job.addLog("Downloading net4sats admin panel...")
+	adminURL := "https://github.com/net4sats/configurationwizzard/releases/download/v0.5.0/net4sats-admin_1.0.0_all.ipk"
+	adminOut := sshRun(client, "wget -qO /tmp/net4sats-admin.ipk '"+adminURL+"' 2>&1 && echo 'downloaded' || echo 'download failed'")
+	if strings.Contains(adminOut, "downloaded") {
+		job.addLog("Admin panel downloaded, installing...")
+		// Try opkg first, then apk
+		installOut := sshRun(client, "opkg install /tmp/net4sats-admin.ipk 2>&1 && echo 'opkg ok' || (apk add --allow-untrusted /tmp/net4sats-admin.ipk 2>&1 && echo 'apk ok') || echo 'install failed'")
+		if strings.Contains(installOut, "opkg ok") || strings.Contains(installOut, "apk ok") {
+			job.addLog("Admin panel installed to /www/net4sats/ (port 8090)")
+			job.setStep(7, "done", "admin panel installed")
+		} else {
+			job.addLog("Install failed: " + truncate(installOut, 60))
+			job.setStep(7, "done", "install failed (downloaded)")
+		}
+	} else {
+		job.addLog("Download failed, skipping admin panel")
+		job.setStep(7, "done", "skipped (download failed)")
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// Step 8: Configure Lightning address + advanced defaults.
 	// lightning_address goes into identities.json → public_identities[].lightning_address
 	// (per tollgate-module-basic-go's schema — it reads ONLY from identities.json,
 	// never from config.json). margin and profit_share factors go into config.json.
 	// If files are absent (tollgate not yet installed), we skip gracefully.
-	job.setStep(7, "running", "")
+	job.setStep(8, "running", "")
 
-	// 7a: Write lightning_address to identities.json (owner identity).
+	// 8a: Write lightning_address to identities.json (owner identity).
 	lnCmd := "jq --arg la '" + req.LNURL + "' " +
 		"'(.public_identities[] | select(.name == \"owner\") | .lightning_address) = $la' " +
 		"/etc/tollgate/identities.json > /tmp/ident.tmp 2>&1 && " +
 		"mv /tmp/ident.tmp /etc/tollgate/identities.json && echo 'identities updated' || echo 'no identities'"
 	lnOut := sshRun(client, lnCmd)
 
-	// 7b: Write margin + profit_share to config.json.
+	// 8b: Write margin + profit_share to config.json.
 	devSplit := clamp(req.DevSplit, 0, 50)
 	margin := clamp(req.Margin, 0, 100)
 	ownerFactor := strconv.FormatFloat(1.0-float64(devSplit)/100.0, 'f', 4, 64)
@@ -295,33 +318,33 @@ func runDeployment(job *Job, req deployRequest) {
 		job.addLog("config.json: margin=" + strconv.Itoa(margin) + "%, devSplit=" + strconv.Itoa(devSplit) + "% (profit_share updated)")
 	}
 	if strings.Contains(lnOut, "identities updated") || strings.Contains(cfgOut, "config updated") {
-		job.setStep(6, "done", "LNURL: "+req.LNURL)
+		job.setStep(8, "done", "LNURL: "+req.LNURL)
 	} else {
 		job.addLog("Config update skipped — no tollgate files found")
 		job.addLog("identities: " + truncate(lnOut, 60))
 		job.addLog("config: " + truncate(cfgOut, 60))
-		job.setStep(6, "done", "skipped (no tollgate config)")
+		job.setStep(8, "done", "skipped (no tollgate config)")
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 8: Restart services
-	job.setStep(8, "running", "")
+	// Step 9: Restart services
+	job.setStep(9, "running", "")
 	job.addLog("Restarting services...")
 	svcOut := sshRun(client, "/etc/init.d/tollgate-wrt restart 2>&1; /etc/init.d/nodogsplash restart 2>&1; sleep 2; echo 'services restarted'")
 	job.addLog("Services restarted: " + truncate(svcOut, 60))
-	job.setStep(8, "done", "tollgate-wrt + nodogsplash restarted")
+	job.setStep(9, "done", "tollgate-wrt + nodogsplash restarted")
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 9: Health check
-	job.setStep(9, "running", "")
+	// Step 10: Health check
+	job.setStep(10, "running", "")
 	job.addLog("Running health check...")
 	healthOut := sshRun(client, "wget -qO- http://127.0.0.1:2121/ 2>/dev/null | head -c 100 || echo 'health check failed'")
 	if strings.Contains(healthOut, "kind") || strings.Contains(healthOut, "metric") || strings.Contains(healthOut, "pubkey") {
 		job.addLog("Health check passed — TollGate API responding")
-		job.setStep(9, "done", "API healthy on :2121")
+		job.setStep(10, "done", "API healthy on :2121")
 	} else {
 		job.addLog("Health check: " + truncate(healthOut, 80))
-		job.setStep(9, "done", "checked")
+		job.setStep(10, "done", "checked")
 	}
 
 	job.mu.Lock()
