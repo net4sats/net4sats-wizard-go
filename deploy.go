@@ -147,9 +147,12 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// Step 6: Configure tollgate config.json — Lightning address + advanced defaults.
-	// config.json keys (lnurl/devSplit/margin/mint) follow tollgate-module-basic-go's
-	// schema. If config.json is absent (tollgate not yet installed), we skip gracefully.
+	// Step 6: Configure tollgate — Lightning address goes to identities.json,
+	// other settings stay in config.json.
+	// tollgate-module-basic-go reads lightning_address from
+	// identities.json → public_identities[].lightning_address (NOT from config.json).
+	// We set the "owner" identity's lightning_address to the user-provided LNURL.
+	// If files are absent (tollgate not yet installed), we skip gracefully.
 	job.setStep(6, "running", "")
 	devSplit := clamp(req.DevSplit, 0, 50)
 	margin := clamp(req.Margin, 0, 100)
@@ -157,15 +160,25 @@ func runDeployment(job *Job, req deployRequest) {
 	if mint == "" {
 		mint = "https://8333.space/"
 	}
-	cfgCmd := "jq --arg ln '" + req.LNURL + "' " +
-		"--argjson ds " + strconv.Itoa(devSplit) + " " +
+	// LNURL → identities.json (owner's lightning_address)
+	identCmd := "jq --arg ln '" + req.LNURL + "' " +
+		"'(.public_identities[] | select(.name == \"owner\")).lightning_address = $ln' " +
+		"/etc/tollgate/identities.json > /tmp/ident.tmp && mv /tmp/ident.tmp /etc/tollgate/identities.json 2>&1 && echo 'identities written' || echo 'no identities'"
+	identOut := sshRun(client, identCmd)
+	if strings.Contains(identOut, "identities written") {
+		job.addLog("identities.json updated (owner lightning_address=" + req.LNURL + ")")
+	} else {
+		job.addLog("identities.json update skipped — file not found")
+	}
+	// devSplit/margin/mint stay in config.json
+	cfgCmd := "jq --argjson ds " + strconv.Itoa(devSplit) + " " +
 		"--argjson m " + strconv.Itoa(margin) + " " +
 		"--arg mint '" + mint + "' " +
-		"'.lnurl=$ln | .devSplit=$ds | .margin=$m | .mint=$mint' " +
+		"'.devSplit=$ds | .margin=$m | .mint=$mint' " +
 		"/etc/tollgate/config.json > /tmp/cfg.tmp && mv /tmp/cfg.tmp /etc/tollgate/config.json 2>&1 && echo 'config written' || echo 'no config'"
 	cfgOut := sshRun(client, cfgCmd)
 	if strings.Contains(cfgOut, "config written") {
-		job.addLog("config.json updated (lnurl=" + req.LNURL + ", devSplit=" + strconv.Itoa(devSplit) + "%, margin=" + strconv.Itoa(margin) + "%, mint=" + truncate(mint, 30) + ")")
+		job.addLog("config.json updated (devSplit=" + strconv.Itoa(devSplit) + "%, margin=" + strconv.Itoa(margin) + "%, mint=" + truncate(mint, 30) + ")")
 		job.setStep(6, "done", "LNURL: "+req.LNURL)
 	} else {
 		job.addLog("Config update skipped — no config.json found")
