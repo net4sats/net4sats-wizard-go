@@ -428,6 +428,7 @@ func runDeployment(job *Job, req deployRequest) {
 	lnOut := sshRun(client, lnCmd)
 
 	// 8b: Write margin + profit_share to config.json.
+	// Also inject testnut mints so users can test with free/test sats.
 	devSplit := clamp(req.DevSplit, 0, 50)
 	margin := clamp(req.Margin, 0, 100)
 	ownerFactor := strconv.FormatFloat(1.0-float64(devSplit)/100.0, 'f', 4, 64)
@@ -437,7 +438,12 @@ func runDeployment(job *Job, req deployRequest) {
 		"--argjson df " + devFactor + " " +
 		"'.margin=$m | " +
 		"(.profit_share[] | select(.identity == \"owner\") | .factor) = $of | " +
-		"(.profit_share[] | select(.identity == \"developer\") | .factor) = $df' " +
+		"(.profit_share[] | select(.identity == \"developer\") | .factor) = $df | " +
+		// Add testnut mints if not already present (idempotent — check by URL)
+		".accepted_mints = (.accepted_mints + " +
+		"[{\"url\":\"https://nofee.testnut.cashu.space\",\"min_balance\":0,\"balance_tolerance_percent\":0,\"payout_interval_seconds\":999999,\"min_payout_amount\":999999,\"price_per_step\":1,\"price_unit\":\"sats\",\"min_purchase_steps\":0}," +
+		" {\"url\":\"https://testnut.cashu.space\",\"min_balance\":0,\"balance_tolerance_percent\":0,\"payout_interval_seconds\":999999,\"min_payout_amount\":999999,\"price_per_step\":1,\"price_unit\":\"sats\",\"min_purchase_steps\":0}] " +
+		"| unique_by(.url))' " +
 		"/etc/tollgate/config.json > /tmp/cfg.tmp 2>&1 && " +
 		"mv /tmp/cfg.tmp /etc/tollgate/config.json && echo 'config updated' || echo 'no config'"
 	cfgOut := sshRun(client, cfgCmd)
@@ -448,6 +454,22 @@ func runDeployment(job *Job, req deployRequest) {
 	if strings.Contains(cfgOut, "config updated") {
 		job.addLog("config.json: margin=" + strconv.Itoa(margin) + "%, devSplit=" + strconv.Itoa(devSplit) + "% (profit_share updated)")
 	}
+
+	// 8c: Inject testnut test mint into config.json so users can test with free sats.
+	// The stable tollgate-wrt package only includes production mints (coinos + minibits).
+	// We add the feeless testnut mint so users can get free test sats from
+	// https://nofee.testnut.cashu.space and verify the payment flow end-to-end.
+	testnutMintCmd := "jq 'if (.mints // [] | map(.url) | index(\"https://nofee.testnut.cashu.space\")) | not then " +
+		".mints += [{\"url\":\"https://nofee.testnut.cashu.space\",\"min_balance\":0,\"balance_tolerance_percent\":0,\"payout_interval_seconds\":999999,\"min_payout_amount\":999999,\"price_per_step\":1,\"price_unit\":\"sats\",\"purchase_min_steps\":0}] " +
+		"else . end' /etc/tollgate/config.json > /tmp/cfg_mint.tmp 2>&1 && " +
+		"mv /tmp/cfg_mint.tmp /etc/tollgate/config.json && echo 'testnut added' || echo 'testnut skipped'"
+	testnutOut := sshRun(client, testnutMintCmd)
+	if strings.Contains(testnutOut, "testnut added") {
+		job.addLog("config.json: testnut test mint added (free test sats for payment testing)")
+	} else {
+		job.addLog("testnut mint: " + truncate(testnutOut, 60))
+	}
+
 	if strings.Contains(lnOut, "identities updated") || strings.Contains(cfgOut, "config updated") {
 		job.setStep(8, "done", "LNURL: "+req.LNURL)
 	} else {
