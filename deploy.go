@@ -394,6 +394,8 @@ func runDeployment(job *Job, req deployRequest) {
 		"uci set uhttpd.luci.ubus_prefix='/ubus'",
 		"uci set uhttpd.luci.script_timeout='60'",
 		"uci set uhttpd.luci.network_timeout='30'",
+		// Don't redirect LuCI to HTTPS — self-signed cert confuses browsers
+		"uci -q set uhttpd.luci.redirect_https='0'",
 		"uci commit uhttpd",
 		// Restart rpcd to pick up new plugin
 		"/etc/init.d/rpcd restart 2>/dev/null || true",
