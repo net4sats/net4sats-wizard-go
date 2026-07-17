@@ -359,17 +359,41 @@ func runDeployment(job *Job, req deployRequest) {
 		job.addLog("Balance page deployed to admin panel")
 	}
 
-	// 7c: uhttpd config — separate instances: net4sats on :8090, luci on :8080
-	sshWriteFile(client, "/etc/config/uhttpd_net4sats", uhttpdNet4sats)
-	// Remove conflicting listeners from main uhttpd instance
+	// 7c: uhttpd config — add net4sats (:8090) and luci (:8080) instances via UCI
+	// Must go into /etc/config/uhttpd (the only file uhttpd init reads)
 	uhttpdOut := sshRun(client, strings.Join([]string{
-		// Remove port 80, 8080, 8090 from main uhttpd (our separate instances handle these)
+		// Remove conflicting listeners from main uhttpd
 		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:80' 2>/dev/null; true",
 		"uci -q del_list uhttpd.main.listen_http='[::]:80' 2>/dev/null; true",
 		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8080' 2>/dev/null; true",
 		"uci -q del_list uhttpd.main.listen_http='[::]:8080' 2>/dev/null; true",
 		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8090' 2>/dev/null; true",
 		"uci -q del_list uhttpd.main.listen_http='[::]:8090' 2>/dev/null; true",
+		// net4sats admin instance on :8090
+		"uci set uhttpd.net4sats=uhttpd",
+		"uci -q del_list uhttpd.net4sats.listen_http='0.0.0.0:8090' 2>/dev/null; true",
+		"uci add_list uhttpd.net4sats.listen_http='0.0.0.0:8090'",
+		"uci -q del_list uhttpd.net4sats.listen_http='[::]:8090' 2>/dev/null; true",
+		"uci add_list uhttpd.net4sats.listen_http='[::]:8090'",
+		"uci set uhttpd.net4sats.home='/www/net4sats'",
+		"uci set uhttpd.net4sats.ubus_prefix='/ubus'",
+		"uci set uhttpd.net4sats.script_timeout='60'",
+		"uci set uhttpd.net4sats.network_timeout='30'",
+		"uci set uhttpd.net4sats.max_requests='3'",
+		"uci set uhttpd.net4sats.tcp_keepalive='1'",
+		// luci instance on :8080
+		"uci set uhttpd.luci=uhttpd",
+		"uci -q del_list uhttpd.luci.listen_http='0.0.0.0:8080' 2>/dev/null; true",
+		"uci add_list uhttpd.luci.listen_http='0.0.0.0:8080'",
+		"uci -q del_list uhttpd.luci.listen_http='[::]:8080' 2>/dev/null; true",
+		"uci add_list uhttpd.luci.listen_http='[::]:8080'",
+		"uci set uhttpd.luci.home='/www'",
+		"uci set uhttpd.luci.cgi_prefix='/cgi-bin'",
+		"uci -q del_list uhttpd.luci.lua_prefix='/cgi-bin/luci=/usr/lib/lua/luci/sgi/uhttpd.lua' 2>/dev/null; true",
+		"uci add_list uhttpd.luci.lua_prefix='/cgi-bin/luci=/usr/lib/lua/luci/sgi/uhttpd.lua'",
+		"uci set uhttpd.luci.ubus_prefix='/ubus'",
+		"uci set uhttpd.luci.script_timeout='60'",
+		"uci set uhttpd.luci.network_timeout='30'",
 		"uci commit uhttpd",
 		// Restart rpcd to pick up new plugin
 		"/etc/init.d/rpcd restart 2>/dev/null || true",
