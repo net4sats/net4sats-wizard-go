@@ -11,6 +11,73 @@
     <title>net4sats</title>
     <script type="module" crossorigin src="./assets/splash-C0y8YH4o.js"></script>
     <link rel="stylesheet" crossorigin href="./assets/splash-Cmh1iVkv.css">
+    <script>
+    // DLEQ Error Interceptor — translates backend "invalid DLEQ proof" into
+    // a user-friendly message. This is a temporary UX mitigation until the
+    // upstream gonuts-tollgate library is patched to handle keyset rotation.
+    (function() {
+      var origFetch = window.fetch;
+      window.fetch = function() {
+        return origFetch.apply(this, arguments).then(function(resp) {
+          if (resp.ok) return resp;
+          // Clone the response so we can read the body without consuming it
+          var clone = resp.clone();
+          clone.text().then(function(body) {
+            try {
+              var data = JSON.parse(body);
+              // Check for DLEQ-related error in kind 21023 responses
+              if (data && data.content && typeof data.content === 'string') {
+                var content = data.content.toLowerCase();
+                if (content.indexOf('dleq') !== -1 || content.indexOf('invalid dleq proof') !== -1) {
+                  // Replace the error message with a user-friendly one
+                  data.content = 'This e-cash note uses an outdated mint key. The mint has rotated its security keys since this token was created. Please obtain a fresh token from the mint and try again.';
+                  // Dispatch a custom event that the portal can pick up
+                  window.dispatchEvent(new CustomEvent('dleq-error-detected', {
+                    detail: { originalMessage: data.content, friendlyMessage: data.content }
+                  }));
+                }
+              }
+            } catch(e) {}
+          }).catch(function() {});
+          return resp;
+        });
+      };
+
+      // Also intercept the portal's error display by patching the error element
+      // after the portal renders its error message
+      var observer = new MutationObserver(function(mutations) {
+        mutations.forEach(function(mutation) {
+          mutation.addedNodes.forEach(function(node) {
+            if (node.nodeType === 3) { // Text node
+              var text = node.textContent.toLowerCase();
+              if (text.indexOf('invalid dleq proof') !== -1 || text.indexOf('dleq') !== -1) {
+                node.textContent = 'This e-cash note uses an outdated mint key. The mint has rotated its security keys since this token was created. Please obtain a fresh token from the mint and try again.';
+              }
+            }
+            if (node.querySelectorAll) {
+              var textNodes = node.querySelectorAll('*');
+              textNodes.forEach(function(el) {
+                if (el.children.length === 0) {
+                  var text = el.textContent.toLowerCase();
+                  if (text.indexOf('invalid dleq proof') !== -1 || text.indexOf('dleq') !== -1) {
+                    el.textContent = 'This e-cash note uses an outdated mint key. The mint has rotated its security keys since this token was created. Please obtain a fresh token from the mint and try again.';
+                  }
+                }
+              });
+            }
+          });
+        });
+      });
+      // Start observing once DOM is ready
+      if (document.body) {
+        observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+      } else {
+        document.addEventListener('DOMContentLoaded', function() {
+          observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+        });
+      }
+    })();
+    </script>
   </head>
   <body>
     <div id="app"></div>
