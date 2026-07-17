@@ -16,58 +16,82 @@
     // a user-friendly message. This is a temporary UX mitigation until the
     // upstream gonuts-tollgate library is patched to handle keyset rotation.
     (function() {
+      var DLEQ_MESSAGE = 'This e-cash note uses an outdated mint key. The mint has rotated its security keys since this token was created. Please obtain a fresh token from the mint and try again.';
+      var DLEQ_PATTERN = /dleq/i;
+
+      // --- Fetch interceptor ---
+      // Monkey-patch window.fetch to intercept error responses and replace
+      // DLEQ-related error messages with the user-friendly text.
       var origFetch = window.fetch;
       window.fetch = function() {
-        return origFetch.apply(this, arguments).then(function(resp) {
+        var args = arguments;
+        return origFetch.apply(this, args).then(function(resp) {
           if (resp.ok) return resp;
-          // Clone the response so we can read the body without consuming it
-          var clone = resp.clone();
-          clone.text().then(function(body) {
-            try {
-              var data = JSON.parse(body);
-              // Check for DLEQ-related error in kind 21023 responses
-              if (data && data.content && typeof data.content === 'string') {
-                var content = data.content.toLowerCase();
-                if (content.indexOf('dleq') !== -1 || content.indexOf('invalid dleq proof') !== -1) {
-                  // Replace the error message with a user-friendly one
-                  data.content = 'This e-cash note uses an outdated mint key. The mint has rotated its security keys since this token was created. Please obtain a fresh token from the mint and try again.';
-                  // Dispatch a custom event that the portal can pick up
-                  window.dispatchEvent(new CustomEvent('dleq-error-detected', {
-                    detail: { originalMessage: data.content, friendlyMessage: data.content }
-                  }));
+          // Clone, read the body, and if it contains "dleq", return a modified
+          // response with the user-friendly message.
+          return resp.clone().text().then(function(bodyText) {
+            if (DLEQ_PATTERN.test(bodyText)) {
+              try {
+                var data = JSON.parse(bodyText);
+                if (data && data.content) {
+                  data.content = DLEQ_MESSAGE;
                 }
+                // Also check tags for the DLEQ error code
+                if (data && data.tags && Array.isArray(data.tags)) {
+                  for (var i = 0; i < data.tags.length; i++) {
+                    if (Array.isArray(data.tags[i]) && data.tags[i][0] === 'code' &&
+                        data.tags[i][1] && data.tags[i][1].indexOf('dleq') !== -1) {
+                      data.content = DLEQ_MESSAGE;
+                      break;
+                    }
+                  }
+                }
+                return new Response(JSON.stringify(data), {
+                  status: resp.status,
+                  statusText: resp.statusText,
+                  headers: resp.headers
+                });
+              } catch(e) {
+                // Body isn't JSON — fall through to return original response
               }
-            } catch(e) {}
-          }).catch(function() {});
-          return resp;
+            }
+            return resp;
+          }).catch(function() {
+            return resp;
+          });
         });
       };
 
-      // Also intercept the portal's error display by patching the error element
-      // after the portal renders its error message
+      // --- MutationObserver fallback ---
+      // Catches DLEQ error text that gets rendered into the DOM directly.
+      function replaceDleqText(el) {
+        if (el.nodeType === 3) { // Text node
+          if (DLEQ_PATTERN.test(el.textContent)) {
+            el.textContent = DLEQ_MESSAGE;
+          }
+        } else if (el.querySelectorAll) {
+          var elements = el.querySelectorAll('*');
+          for (var i = 0; i < elements.length; i++) {
+            var child = elements[i];
+            if (child.children.length === 0 && DLEQ_PATTERN.test(child.textContent)) {
+              child.textContent = DLEQ_MESSAGE;
+            }
+          }
+        }
+      }
+
       var observer = new MutationObserver(function(mutations) {
         mutations.forEach(function(mutation) {
           mutation.addedNodes.forEach(function(node) {
-            if (node.nodeType === 3) { // Text node
-              var text = node.textContent.toLowerCase();
-              if (text.indexOf('invalid dleq proof') !== -1 || text.indexOf('dleq') !== -1) {
-                node.textContent = 'This e-cash note uses an outdated mint key. The mint has rotated its security keys since this token was created. Please obtain a fresh token from the mint and try again.';
-              }
-            }
-            if (node.querySelectorAll) {
-              var textNodes = node.querySelectorAll('*');
-              textNodes.forEach(function(el) {
-                if (el.children.length === 0) {
-                  var text = el.textContent.toLowerCase();
-                  if (text.indexOf('invalid dleq proof') !== -1 || text.indexOf('dleq') !== -1) {
-                    el.textContent = 'This e-cash note uses an outdated mint key. The mint has rotated its security keys since this token was created. Please obtain a fresh token from the mint and try again.';
-                  }
-                }
-              });
+            if (node.nodeType === 3) {
+              replaceDleqText(node);
+            } else if (node.querySelectorAll) {
+              replaceDleqText(node);
             }
           });
         });
       });
+
       // Start observing once DOM is ready
       if (document.body) {
         observer.observe(document.body, { childList: true, subtree: true, characterData: true });
