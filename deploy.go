@@ -214,6 +214,9 @@ func runDeployment(job *Job, req deployRequest) {
 		"uci -q set network.lan.domain='lan'",
 		// NoDogSplash config
 		"uci -q set nodogsplash.@nodogsplash[0].gatewayname='" + nodeName + "'",
+		// Rebrand gateway domain from upstream 'TollGate.lan' to net4sats.lan
+		// so the captive portal serves on net4sats.lan (DNS already resolves both).
+		"uci -q set nodogsplash.@nodogsplash[0].gatewaydomainname='net4sats.lan'",
 		"uci -q set nodogsplash.@nodogsplash[0].enabled='1'",
 		"uci -q set nodogsplash.@nodogsplash[0].clientid='mac'",
 		"uci -q del_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121' 2>/dev/null; uci -q add_list nodogsplash.@nodogsplash[0].users_to_router='allow tcp port 2121'",
@@ -233,6 +236,7 @@ func runDeployment(job *Job, req deployRequest) {
 		"uci -q set wireless.radio1.disabled='0' 2>/dev/null; true",
 		"uci commit wireless",
 		"/etc/init.d/nodogsplash enable",
+		"/etc/init.d/nodogsplash restart 2>/dev/null || true",
 		"/etc/init.d/dnsmasq restart 2>/dev/null || true",
 		// Apply wireless config (wifi reload applies UCI, wifi starts if not running)
 		"wifi reload 2>/dev/null || wifi 2>/dev/null || true",
