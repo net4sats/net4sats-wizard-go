@@ -160,7 +160,7 @@ func runDeployment(job *Job, req deployRequest) {
 	// Step 5: Brand as net4sats — hostname, SSID, DNS, nodogsplash config
 	job.setStep(5, "running", "")
 	// Generate unique suffix (e.g. net4sats-a7f2) so multiple routers don't clash
-	const ssidChars = "abcdefghijklmnopqrstuvwxyz0123456789"
+	const ssidChars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
 	suffix := make([]byte, 4)
 	randBytes := make([]byte, 4)
 	if _, err := cryptorand.Read(randBytes); err != nil {
