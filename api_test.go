@@ -9,19 +9,19 @@ import (
 func TestHandleScan(t *testing.T) {
 	req := httptest.NewRequest("GET", "/api/scan", nil)
 	w := httptest.NewRecorder()
-	
+
 	handleScan(w, req)
-	
+
 	resp := w.Result()
 	if resp.StatusCode != 200 {
 		t.Errorf("handleScan: status code = %d, want 200", resp.StatusCode)
 	}
-	
+
 	var respJSON map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&respJSON); err != nil {
 		t.Fatalf("handleScan: failed to decode JSON: %v", err)
 	}
-	
+
 	if _, ok := respJSON["routers"].([]interface{}); !ok {
 		t.Error("handleScan: response should have 'routers' array")
 	}
@@ -30,14 +30,14 @@ func TestHandleScan(t *testing.T) {
 func TestHandleIndex(t *testing.T) {
 	req := httptest.NewRequest("GET", "/", nil)
 	w := httptest.NewRecorder()
-	
+
 	handleIndex(w, req)
-	
+
 	resp := w.Result()
 	if resp.StatusCode != 200 {
 		t.Errorf("handleIndex: status code = %d, want 200", resp.StatusCode)
 	}
-	
+
 	if resp.Header.Get("Content-Type") != "text/html; charset=utf-8" {
 		t.Errorf("handleIndex: Content-Type = %q, want %q", resp.Header.Get("Content-Type"), "text/html; charset=utf-8")
 	}
@@ -89,7 +89,7 @@ func TestDeployRequestValidation(t *testing.T) {
 				}
 				return
 			}
-			
+
 			got := validLightningAddress(tt.req.LNURL)
 			if !got && !tt.wantErr {
 				t.Errorf("%s: validLightningAddress returned false, want true for valid input", tt.name)
@@ -107,7 +107,7 @@ func TestDeployRequestDefaults(t *testing.T) {
 		Password: "password",
 		LNURL:    "test@wallet.app",
 	}
-	
+
 	if req.DevSplit != 0 {
 		t.Errorf("default DevSplit = %d, want 0", req.DevSplit)
 	}
@@ -121,11 +121,11 @@ func TestDeployRequestDefaults(t *testing.T) {
 
 func TestStepInitialization(t *testing.T) {
 	steps := deploySteps()
-	
+
 	if len(steps) == 0 {
 		t.Error("deploySteps should not return empty steps")
 	}
-	
+
 	expectedSteps := []string{"verify", "firmware", "password", "upstream", "install", "brand", "portal", "admin", "lnurl", "services", "health"}
 	for i, expected := range expectedSteps {
 		if i >= len(steps) {

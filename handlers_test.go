@@ -18,49 +18,49 @@ func TestHandleStatus(t *testing.T) {
 	job.Steps[0].Status = "done"
 	job.Steps[0].Detail = "test detail"
 	job.addLog("test log message")
-	
+
 	jobsMutex.Lock()
 	jobs[jobID] = job
 	jobsMutex.Unlock()
-	
+
 	req := httptest.NewRequest("GET", "/api/status/"+jobID, nil)
 	w := httptest.NewRecorder()
-	
+
 	handleStatus(w, req)
-	
+
 	resp := w.Result()
 	if resp.StatusCode != 200 {
 		t.Errorf("handleStatus: status code = %d, want 200", resp.StatusCode)
 		return
 	}
-	
+
 	var respJSON map[string]any
 	if err := json.NewDecoder(resp.Body).Decode(&respJSON); err != nil {
 		t.Fatalf("handleStatus: failed to decode JSON: %v", err)
 	}
-	
+
 	// Check if the fields are present and have correct types (lowercase!)
 	ipVal, ok := respJSON["ip"].(string)
 	if !ok || ipVal != "192.168.1.1" {
 		t.Errorf("handleStatus: ip = %v (%T), want 192.168.1.1 (string)", respJSON["ip"], respJSON["ip"])
 	}
-	
+
 	statusVal, ok := respJSON["status"].(string)
 	if !ok || statusVal != "done" {
 		t.Errorf("handleStatus: status = %v (%T), want done (string)", respJSON["status"], respJSON["status"])
 	}
-	
+
 	stepVal, ok := respJSON["step"].(float64)
 	if !ok || stepVal != 2 {
 		t.Errorf("handleStatus: step = %v (%T), want 2 (float64)", respJSON["step"], respJSON["step"])
 	}
-	
+
 	// Test non-existent job
 	req2 := httptest.NewRequest("GET", "/api/status/nonexistent", nil)
 	w2 := httptest.NewRecorder()
-	
+
 	handleStatus(w2, req2)
-	
+
 	resp2 := w2.Result()
 	if resp2.StatusCode != 404 {
 		t.Errorf("handleStatus: nonexistent job status = %d, want 404", resp2.StatusCode)
@@ -104,15 +104,15 @@ func TestHandleDeploy(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest("POST", "/api/deploy", strings.NewReader(tt.body))
 			w := httptest.NewRecorder()
-			
+
 			handleDeploy(w, req)
-			
+
 			resp := w.Result()
 			if resp.StatusCode != tt.expectedStatus {
 				t.Errorf("%s: status code = %d, want %d", tt.name, resp.StatusCode, tt.expectedStatus)
 				return
 			}
-			
+
 			if tt.expectedError != "" {
 				var respJSON map[string]string
 				if err := json.NewDecoder(resp.Body).Decode(&respJSON); err != nil {
@@ -137,12 +137,12 @@ func TestHandleDeploy(t *testing.T) {
 func TestMainFunctionStructure(t *testing.T) {
 	// Test that the main function sets up routes correctly
 	// This is a basic structural test since we can't easily run the main function
-	
+
 	// Check that listenAddr is properly set
 	if listenAddr != ":8099" {
 		t.Errorf("listenAddr = %q, want %q", listenAddr, ":8099")
 	}
-	
+
 	// Verify the regex patterns are compiled
 	if lnAddrRe == nil {
 		t.Error("lnAddrRe should be compiled")
@@ -154,7 +154,7 @@ func TestMainFunctionStructure(t *testing.T) {
 
 func TestJobStructFields(t *testing.T) {
 	job := newJob("192.168.1.1")
-	
+
 	// Test that all expected fields are present and initialized
 	if job.IP == "" {
 		t.Error("Job.IP should not be empty")
@@ -168,13 +168,13 @@ func TestJobStructFields(t *testing.T) {
 	// Mutex is a sync.RWMutex, check it's not zero value by trying to lock it
 	job.mu.Lock()
 	defer job.mu.Unlock()
-	
+
 	// If we get here without panic, the mutex is properly initialized
 }
 
 func TestDeployStepStruct(t *testing.T) {
 	step := Step{Name: "test", Desc: "test description", Status: "pending"}
-	
+
 	if step.Name != "test" {
 		t.Errorf("Step.Name = %q, want %q", step.Name, "test")
 	}
@@ -188,7 +188,7 @@ func TestDeployStepStruct(t *testing.T) {
 
 func TestLogEntryStruct(t *testing.T) {
 	entry := LogEntry{Time: float64(time.Now().Unix()), Msg: "test log"}
-	
+
 	if entry.Msg != "test log" {
 		t.Errorf("LogEntry.Msg = %q, want %q", entry.Msg, "test log")
 	}
@@ -199,9 +199,9 @@ func TestLogEntryStruct(t *testing.T) {
 
 func TestConcurrentJobOperations(t *testing.T) {
 	job := newJob("192.168.1.1")
-	
+
 	var wg sync.WaitGroup
-	
+
 	// Test concurrent addLog operations
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
@@ -210,14 +210,14 @@ func TestConcurrentJobOperations(t *testing.T) {
 			job.addLog("concurrent log message")
 		}(i)
 	}
-	
+
 	wg.Wait()
-	
+
 	// Should have exactly 10 log entries
 	if len(job.Log) != 10 {
 		t.Errorf("Expected 10 log entries, got %d", len(job.Log))
 	}
-	
+
 	// Test concurrent setStep operations
 	for i := 0; i < 5; i++ {
 		wg.Add(1)
@@ -226,9 +226,9 @@ func TestConcurrentJobOperations(t *testing.T) {
 			job.setStep(stepNum%3, "done", "test detail")
 		}(i)
 	}
-	
+
 	wg.Wait()
-	
+
 	// Should not have panicked, should have some steps updated
 	// The exact step count depends on timing, but no crash is the key
 	if len(job.Steps) == 0 {

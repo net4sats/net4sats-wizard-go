@@ -17,7 +17,7 @@ func TestTruncate(t *testing.T) {
 		{"hello world", 5, "hello..."},
 		{"hello", 5, "hello"},
 		{"hello world", 0, "..."}, // Edge case: maxLen = 0
-		{"", 5, ""},            // Edge case: empty string
+		{"", 5, ""},               // Edge case: empty string
 		{"a very long string that needs truncating", 10, "a very lon..."},
 		{"string with trailing spaces   ", 20, "string with trailing..."}, // len=27 after trim, so truncated
 		{"short", 10, "short"}, // len < maxLen
@@ -33,7 +33,7 @@ func TestTruncate(t *testing.T) {
 
 func TestNewJob(t *testing.T) {
 	job := newJob("192.168.1.1")
-	
+
 	if job.IP != "192.168.1.1" {
 		t.Errorf("newJob IP = %q, want %q", job.IP, "192.168.1.1")
 	}
@@ -51,13 +51,13 @@ func TestNewJob(t *testing.T) {
 func TestAddLog(t *testing.T) {
 	job := newJob("192.168.1.1")
 	initialLen := len(job.Log)
-	
+
 	job.addLog("test message")
-	
+
 	if len(job.Log) != initialLen+1 {
 		t.Errorf("addLog: log count = %d, want %d", len(job.Log), initialLen+1)
 	}
-	
+
 	logEntry := job.Log[len(job.Log)-1]
 	if logEntry.Msg != "test message" {
 		t.Errorf("addLog: last message = %q, want %q", logEntry.Msg, "test message")
@@ -69,7 +69,7 @@ func TestAddLog(t *testing.T) {
 
 func TestSetStep(t *testing.T) {
 	job := newJob("192.168.1.1")
-	
+
 	// Test setting a valid step
 	job.setStep(0, "done", "test detail")
 	if job.Step != 0 {
@@ -81,7 +81,7 @@ func TestSetStep(t *testing.T) {
 	if job.Steps[0].Detail != "test detail" {
 		t.Errorf("setStep: Detail = %q, want %q", job.Steps[0].Detail, "test detail")
 	}
-	
+
 	// Test setting step out of bounds
 	job.setStep(999, "running", "")
 	if job.Step != 0 { // Should remain unchanged
@@ -91,19 +91,19 @@ func TestSetStep(t *testing.T) {
 
 func TestWriteError(t *testing.T) {
 	w := httptest.NewRecorder()
-	
+
 	writeError(w, 400, "test error")
-	
+
 	resp := w.Result()
 	if resp.StatusCode != 400 {
 		t.Errorf("writeError: status code = %d, want 400", resp.StatusCode)
 	}
-	
+
 	var respJSON map[string]string
 	if err := json.NewDecoder(resp.Body).Decode(&respJSON); err != nil {
 		t.Fatalf("writeError: failed to decode JSON: %v", err)
 	}
-	
+
 	if respJSON["error"] != "test error" {
 		t.Errorf("writeError: error message = %q, want %q", respJSON["error"], "test error")
 	}
@@ -115,7 +115,7 @@ func TestTcpProbe(t *testing.T) {
 	if result {
 		t.Error("tcpProbe: non-routable IP should return false")
 	}
-	
+
 	// Test with invalid port
 	result = tcpProbe("192.168.1.1", 99999, 100*time.Millisecond)
 	if result {
@@ -125,11 +125,11 @@ func TestTcpProbe(t *testing.T) {
 
 func TestJobMutexSafety(t *testing.T) {
 	job := newJob("192.168.1.1")
-	
+
 	// Test concurrent access to job
 	var wg sync.WaitGroup
 	done := make(chan bool, 10)
-	
+
 	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(id int) {
@@ -139,14 +139,14 @@ func TestJobMutexSafety(t *testing.T) {
 			done <- true
 		}(i)
 	}
-	
+
 	wg.Wait()
 	close(done)
-	
+
 	// Should have 10 log entries
 	if len(job.Log) != 10 {
 		t.Errorf("concurrent addLog: expected 10 entries, got %d", len(job.Log))
 	}
-	
+
 	// Should not have panicked or had race conditions
 }
