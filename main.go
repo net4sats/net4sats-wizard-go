@@ -256,16 +256,42 @@ func handleWifiScan(w http.ResponseWriter, r *http.Request) {
 	}
 	defer client.Close()
 
-	// Try iwinfo first (preinstalled on most OpenWrt), then fall back to iw dev.
-	// Use "iwinfo scan" without a device name — iwinfo scans all radios.
-	// Some builds need a device, so try common names as fallback.
-	scanOut := sshRun(client, "iwinfo scan 2>/dev/null")
-	if strings.TrimSpace(scanOut) == "" || strings.Contains(scanOut, "command not found") || strings.Contains(scanOut, "No such device") {
-		// Try common wlan interface names
+	// Auto-detect wireless interfaces from `iwinfo` (no args) output.
+	// OpenWrt interfaces can be named phy0-ap0, wlan0, wl0-sha0, etc —
+	// not predictable, so we parse the list first.
+	iwinfoOut := sshRun(client, "iwinfo 2>/dev/null")
+	var wifiDevs []string
+	for _, line := range strings.Split(iwinfoOut, "\n") {
+		trimmed := strings.TrimSpace(line)
+		// iwinfo lines look like: "phy0-ap0 ESSID: \"TollGate-F794\""
+		// or "wlan0     ESSID: \"mywifi\""
+		// The first token before "ESSID:" is the interface name
+		if idx := strings.Index(trimmed, "ESSID:"); idx > 0 {
+			iface := strings.TrimSpace(trimmed[:idx])
+			if iface != "" && !strings.HasPrefix(iface, "Usage") {
+				wifiDevs = append(wifiDevs, iface)
+			}
+		}
+	}
+
+	var scanOut string
+	if len(wifiDevs) > 0 {
+		// Scan each detected interface
+		for _, dev := range wifiDevs {
+			out := sshRun(client, "iwinfo "+dev+" scan 2>/dev/null")
+			if strings.TrimSpace(out) != "" && !strings.Contains(out, "command not found") {
+				scanOut += out + "\n"
+			}
+		}
+	}
+
+	// Fallback: try common interface names if auto-detect found nothing
+	if strings.TrimSpace(scanOut) == "" {
 		scanOut = sshRun(client, "iwinfo wlan0 scan 2>/dev/null || iwinfo wlan1 scan 2>/dev/null")
 	}
+
+	// Fallback: try iw dev scan
 	if strings.TrimSpace(scanOut) == "" || strings.Contains(scanOut, "command not found") || strings.Contains(scanOut, "No such device") {
-		// Fallback to iw dev scan
 		scanOut = sshRun(client, "iw dev scan 2>/dev/null")
 		if strings.TrimSpace(scanOut) != "" && !strings.Contains(scanOut, "command not found") {
 			ssids := parseIwScan(scanOut)
@@ -273,7 +299,7 @@ func handleWifiScan(w http.ResponseWriter, r *http.Request) {
 			json.NewEncoder(w).Encode(map[string]any{"ssids": ssids})
 			return
 		}
-		writeError(w, 500, "WiFi scan failed — iwinfo/iw not available or no results")
+		writeError(w, 500, "WiFi scan failed — no wireless interfaces found or iwinfo/iw not available")
 		return
 	}
 
