@@ -149,11 +149,11 @@
   <div id="select-view" class="card hidden">
     <div class="field">
       <label>Select your router</label>
-      <select id="router-select" onchange="checkReady()"></select>
+      <select id="router-select" onchange="onRouterChange()"></select>
     </div>
     <div class="field">
       <label>Router password</label>
-      <input type="password" id="password" placeholder="Enter router admin password" autocomplete="off" oninput="checkReady()">
+      <input type="password" id="password" placeholder="Enter router admin password" autocomplete="off" oninput="onPasswordChange()">
     </div>
     <div class="field">
       <label>Upstream connection</label>
@@ -165,7 +165,13 @@
     <div id="sta-fields" class="hidden">
       <div class="field">
         <label>Upstream WiFi SSID</label>
-        <input type="text" id="ssid" placeholder="Enter upstream WiFi name">
+        <div style="display:flex; gap:0.5rem; align-items:center;">
+          <select id="ssid" disabled>
+            <option value="">Select router first to scan...</option>
+          </select>
+          <button type="button" class="btn btn-secondary" id="rescan-btn" onclick="wifiScan()" style="width:auto; padding:10px 14px; margin-top:0; white-space:nowrap;">Rescan</button>
+        </div>
+        <div class="hint" id="ssid-hint">Choose the WiFi network to repeat.</div>
       </div>
       <div class="field">
         <label>Upstream WiFi password</label>
@@ -237,12 +243,131 @@
 let detectedRouters = [];
 let pollTimer = null;
 let upstreamMode = 'wan';
+let scannedSSIDs = [];
+let wifiScanned = false;
 
 function selectMode(mode) {
   upstreamMode = mode;
   document.getElementById('mode-wan').classList.toggle('selected', mode === 'wan');
   document.getElementById('mode-sta').classList.toggle('selected', mode === 'sta');
   document.getElementById('sta-fields').classList.toggle('hidden', mode !== 'sta');
+  if (mode === 'sta' && !wifiScanned) {
+    wifiScan();
+  }
+  checkReady();
+}
+
+function onPasswordChange() {
+  // If STA mode is active, reset scan so it re-triggers with new password
+  if (upstreamMode === 'sta') {
+    wifiScanned = false;
+    const ssidSelect = document.getElementById('ssid');
+    ssidSelect.innerHTML = '<option value="">Enter router password to scan...</option>';
+    ssidSelect.disabled = true;
+    if (document.getElementById('password').value.length >= 1) {
+      // Debounce: only auto-scan after user stops typing briefly
+      clearTimeout(window._wifiScanTimer);
+      window._wifiScanTimer = setTimeout(wifiScan, 600);
+    }
+  }
+  checkReady();
+}
+
+function onRouterChange() {
+  // Reset WiFi scan when router changes
+  if (upstreamMode === 'sta') {
+    wifiScanned = false;
+    const ssidSelect = document.getElementById('ssid');
+    ssidSelect.innerHTML = '<option value="">Enter router password to scan...</option>';
+    ssidSelect.disabled = true;
+  }
+  checkReady();
+}
+
+async function wifiScan() {
+  const ip = document.getElementById('router-select').value;
+  const password = document.getElementById('password').value;
+  const ssidSelect = document.getElementById('ssid');
+  const ssidHint = document.getElementById('ssid-hint');
+  const rescanBtn = document.getElementById('rescan-btn');
+
+  if (!ip || !password) {
+    ssidSelect.innerHTML = '<option value="">Enter router password first...</option>';
+    ssidSelect.disabled = true;
+    ssidHint.textContent = 'Enter router password to enable WiFi scan.';
+    return;
+  }
+
+  // Show scanning state
+  ssidSelect.innerHTML = '<option value="">Scanning...</option>';
+  ssidSelect.disabled = true;
+  rescanBtn.disabled = true;
+  ssidHint.textContent = 'Scanning for nearby WiFi networks...';
+
+  try {
+    const resp = await fetch('/api/wifi-scan', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ip: ip, password: password }),
+    });
+    const data = await resp.json();
+
+    if (data.error) {
+      ssidSelect.innerHTML = '<option value="">Scan failed</option>';
+      ssidHint.textContent = data.error + ' — check router password and try Rescan.';
+      ssidSelect.disabled = true;
+      wifiScanned = false;
+      return;
+    }
+
+    scannedSSIDs = data.ssids || [];
+    if (scannedSSIDs.length === 0) {
+      ssidSelect.innerHTML = '<option value="">No networks found</option>';
+      ssidHint.textContent = 'No WiFi networks detected. Try Rescan.';
+      ssidSelect.disabled = true;
+      wifiScanned = true;
+      return;
+    }
+
+    // Populate dropdown
+    ssidSelect.innerHTML = '';
+    const placeholder = document.createElement('option');
+    placeholder.value = '';
+    placeholder.textContent = 'Select a network...';
+    ssidSelect.appendChild(placeholder);
+
+    scannedSSIDs.forEach(s => {
+      const opt = document.createElement('option');
+      opt.value = s.name;
+      const enc = s.encryption || 'unknown';
+      opt.textContent = s.name + (enc && enc !== 'none' ? '  (' + enc + ')' : '  (open)');
+      opt.dataset.encryption = enc;
+      ssidSelect.appendChild(opt);
+    });
+
+    ssidSelect.disabled = false;
+    wifiScanned = true;
+    ssidHint.textContent = 'Found ' + scannedSSIDs.length + ' network(s). Select one to repeat.';
+    ssidSelect.onchange = function() {
+      const sel = ssidSelect.options[ssidSelect.selectedIndex];
+      const enc = sel ? sel.dataset.encryption : '';
+      if (enc && enc !== 'unknown' && enc !== 'none') {
+        ssidHint.textContent = 'Selected: ' + ssidSelect.value + ' — Encryption: ' + enc;
+      } else if (enc === 'none') {
+        ssidHint.textContent = 'Selected: ' + ssidSelect.value + ' — Open network (no password needed)';
+      } else {
+        ssidHint.textContent = 'Selected: ' + ssidSelect.value;
+      }
+      checkReady();
+    };
+  } catch (e) {
+    ssidSelect.innerHTML = '<option value="">Scan failed</option>';
+    ssidHint.textContent = 'Network error during scan. Try Rescan.';
+    ssidSelect.disabled = true;
+    wifiScanned = false;
+  } finally {
+    rescanBtn.disabled = false;
+  }
 }
 
 async function scan() {
@@ -299,8 +424,13 @@ function checkReady() {
   const ip = document.getElementById('router-select').value;
   const password = document.getElementById('password').value;
   const ln = document.getElementById('lnurl').value;
-  document.getElementById('deploy-btn').disabled =
-    !(ip && password && validLightning(ln));
+  let ready = !!(ip && password && validLightning(ln));
+  // For STA mode, also require an SSID to be selected
+  if (ready && upstreamMode === 'sta') {
+    const ssidVal = document.getElementById('ssid').value;
+    if (!ssidVal) ready = false;
+  }
+  document.getElementById('deploy-btn').disabled = !ready;
 }
 
 async function startDeploy() {

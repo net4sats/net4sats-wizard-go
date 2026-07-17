@@ -10,6 +10,8 @@ import (
 	"log"
 	"net/http"
 	"regexp"
+	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -103,6 +105,183 @@ func handleScan(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]any{"routers": routers})
 }
 
+// wifiScanRequest is the JSON body for /api/wifi-scan.
+type wifiScanRequest struct {
+	IP       string `json:"ip"`
+	Password string `json:"password"`
+}
+
+// wifiSSID represents a single SSID found during a WiFi scan.
+type wifiSSID struct {
+	Name       string `json:"name"`
+	Encryption string `json:"encryption"`
+	Signal     int    `json:"signal"` // dBm, e.g. -45 (0 if unknown)
+}
+
+// parseIwinfoScan parses `iwinfo scan` output and returns deduplicated SSIDs
+// sorted by signal strength (strongest first). iwinfo output on OpenWrt:
+//
+//	wl0-sha0   ESSID: "MyWiFi"
+//	          Mode: Master  Channel: 6 (2.4 GHz)
+//	          Signal: -45 dBm  Quality: 70/70
+//	          Encryption: WPA2 PSK (CCMP)
+//
+// Some versions prefix with "Cell 01 - Address: ..." instead of the interface name.
+func parseIwinfoScan(output string) []wifiSSID {
+	seen := map[string]bool{}
+	var ssids []wifiSSID
+	var currentName, currentEnc string
+	var currentSignal int
+
+	flush := func() {
+		if currentName != "" && !seen[currentName] {
+			seen[currentName] = true
+			ssids = append(ssids, wifiSSID{Name: currentName, Encryption: currentEnc, Signal: currentSignal})
+		}
+		currentName = ""
+		currentEnc = ""
+		currentSignal = 0
+	}
+
+	for _, line := range strings.Split(output, "\n") {
+		trimmed := strings.TrimSpace(line)
+
+		// "Cell" prefix (some iwinfo versions) or a new ESSID line indicates a new block
+		if strings.HasPrefix(trimmed, "Cell ") {
+			flush()
+			continue
+		}
+
+		// ESSID — may appear on the interface-name line or indented
+		if idx := strings.Index(trimmed, "ESSID:"); idx >= 0 {
+			// If we already have a name, this is a new block (interface-name-prefixed format)
+			if currentName != "" {
+				flush()
+			}
+			val := strings.TrimSpace(trimmed[idx+len("ESSID:"):])
+			val = strings.Trim(val, "\"")
+			if val != "" {
+				currentName = val
+			}
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "Signal:") {
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "Signal:"))
+			fields := strings.Fields(val)
+			if len(fields) > 0 {
+				if dbm, err := strconv.Atoi(fields[0]); err == nil {
+					currentSignal = dbm
+				}
+			}
+			continue
+		}
+
+		if strings.HasPrefix(trimmed, "Encryption:") {
+			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "Encryption:"))
+			currentEnc = val
+			continue
+		}
+	}
+	flush()
+
+	// Sort by signal strength descending (strongest = highest dBm first)
+	sort.Slice(ssids, func(i, j int) bool {
+		return ssids[i].Signal > ssids[j].Signal
+	})
+
+	return ssids
+}
+
+// parseIwScan parses `iw dev wlan0 scan` output (fallback when iwinfo absent).
+// iw output uses:
+//
+//	BSS aa:bb:cc:dd:ee:ff on wlan0
+//	    freq: 2412
+//	    SSID: NetworkName
+//	    ...
+//	    capability: ...
+//	    * primary channel: 1
+func parseIwScan(output string) []wifiSSID {
+	seen := map[string]bool{}
+	var ssids []wifiSSID
+	var currentName string
+
+	for _, line := range strings.Split(output, "\n") {
+		line = strings.TrimSpace(line)
+		if strings.HasPrefix(line, "BSS ") {
+			if currentName != "" && !seen[currentName] {
+				seen[currentName] = true
+				ssids = append(ssids, wifiSSID{Name: currentName, Encryption: "unknown"})
+			}
+			currentName = ""
+			continue
+		}
+		if strings.HasPrefix(line, "SSID:") {
+			val := strings.TrimSpace(strings.TrimPrefix(line, "SSID:"))
+			if val != "" {
+				currentName = val
+			}
+		}
+	}
+	if currentName != "" && !seen[currentName] {
+		seen[currentName] = true
+		ssids = append(ssids, wifiSSID{Name: currentName, Encryption: "unknown"})
+	}
+	return ssids
+}
+
+func handleWifiScan(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, 405, "method not allowed")
+		return
+	}
+	var req wifiScanRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, 400, "invalid JSON")
+		return
+	}
+	if req.IP == "" || req.Password == "" {
+		writeError(w, 400, "IP and password required")
+		return
+	}
+
+	client := sshConnect(req.IP, req.Password)
+	if client == nil && req.Password != "" {
+		client = sshConnect(req.IP, "")
+	}
+	if client == nil {
+		writeError(w, 502, "cannot connect to router via SSH")
+		return
+	}
+	defer client.Close()
+
+	// Try iwinfo first (preinstalled on most OpenWrt), then fall back to iw dev.
+	// Use "iwinfo scan" without a device name — iwinfo scans all radios.
+	// Some builds need a device, so try common names as fallback.
+	scanOut := sshRun(client, "iwinfo scan 2>/dev/null")
+	if strings.TrimSpace(scanOut) == "" || strings.Contains(scanOut, "command not found") || strings.Contains(scanOut, "No such device") {
+		// Try common wlan interface names
+		scanOut = sshRun(client, "iwinfo wlan0 scan 2>/dev/null || iwinfo wlan1 scan 2>/dev/null")
+	}
+	if strings.TrimSpace(scanOut) == "" || strings.Contains(scanOut, "command not found") || strings.Contains(scanOut, "No such device") {
+		// Fallback to iw dev scan
+		scanOut = sshRun(client, "iw dev scan 2>/dev/null")
+		if strings.TrimSpace(scanOut) != "" && !strings.Contains(scanOut, "command not found") {
+			ssids := parseIwScan(scanOut)
+			w.Header().Set("Content-Type", "application/json")
+			json.NewEncoder(w).Encode(map[string]any{"ssids": ssids})
+			return
+		}
+		writeError(w, 500, "WiFi scan failed — iwinfo/iw not available or no results")
+		return
+	}
+
+	ssids := parseIwinfoScan(scanOut)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]any{"ssids": ssids})
+}
+
 type deployRequest struct {
 	IP       string `json:"ip"`
 	Password string `json:"password"`
@@ -182,6 +361,7 @@ func writeError(w http.ResponseWriter, code int, msg string) {
 func main() {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/api/scan", handleScan)
+	mux.HandleFunc("/api/wifi-scan", handleWifiScan)
 	mux.HandleFunc("/api/deploy", handleDeploy)
 	mux.HandleFunc("/api/status/", handleStatus)
 	mux.HandleFunc("/", handleIndex)

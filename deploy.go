@@ -114,11 +114,40 @@ func runDeployment(job *Job, req deployRequest) {
 			"uci commit wireless && uci commit network && echo 'sta configured'"
 		staOut := sshRun(client, staCmd)
 		if strings.Contains(staOut, "sta configured") {
-			job.addLog("WiFi STA configured: " + req.SSID)
-			job.setStep(3, "done", "STA mode: "+req.SSID)
+			// Run wifi reload so the STA interface actually comes up
+			job.addLog("Running wifi reload to bring up STA interface...")
+			sshRun(client, "wifi reload 2>/dev/null || wifi 2>/dev/null || true")
+			// Wait for the interface to come up (STA association takes a few seconds)
+			time.Sleep(5 * time.Second)
+
+			// Verify the STA interface is up and associated
+			job.addLog("Verifying WiFi STA connection...")
+			verifyOut := sshRun(client,
+				"iwinfo 2>/dev/null | grep -A5 'net4sats_uplink' | grep -q 'ESSID: \""+req.SSID+"\"' && echo 'STA_CONNECTED' || "+
+					"ubus call network.wireless status 2>/dev/null | grep -q '\"up\": true' && echo 'STA_CONNECTED' || echo 'STA_NOT_CONNECTED'")
+
+			if strings.Contains(verifyOut, "STA_CONNECTED") {
+				job.addLog("WiFi STA connected: " + req.SSID)
+				job.setStep(3, "done", "STA mode: "+req.SSID)
+			} else {
+				job.addLog("WiFi STA verification failed — interface not associated")
+				job.addLog("Check output: " + truncate(verifyOut, 80))
+				job.setStep(3, "failed", "WiFi connection failed — check SSID and password")
+				job.mu.Lock()
+				job.Status = "failed"
+				job.Error = "WiFi STA connection failed — check SSID and password for \"" + req.SSID + "\""
+				job.mu.Unlock()
+				return
+			}
 		} else {
-			job.addLog("WiFi STA configuration attempted")
-			job.setStep(3, "done", "STA configured")
+			job.addLog("WiFi STA configuration failed")
+			job.addLog("Output: " + truncate(staOut, 80))
+			job.setStep(3, "failed", "STA configuration error")
+			job.mu.Lock()
+			job.Status = "failed"
+			job.Error = "Failed to configure WiFi STA mode"
+			job.mu.Unlock()
+			return
 		}
 	} else {
 		job.addLog("Using WAN upstream (default)")
@@ -439,11 +468,13 @@ func runDeployment(job *Job, req deployRequest) {
 		"'.margin=$m | " +
 		"(.profit_share[] | select(.identity == \"owner\") | .factor) = $of | " +
 		"(.profit_share[] | select(.identity == \"developer\") | .factor) = $df | " +
-		// Add testnut mints if not already present (idempotent — check by URL)
-		".accepted_mints = (.accepted_mints + " +
+		// Add testnut test mints if not already present (idempotent by URL check).
+		// Uses map + index instead of unique_by for jq <1.7 compatibility on OpenWrt.
+		".accepted_mints = (if (.accepted_mints | map(.url) | index(\"https://nofee.testnut.cashu.space\")) | not then " +
+		".accepted_mints + " +
 		"[{\"url\":\"https://nofee.testnut.cashu.space\",\"min_balance\":0,\"balance_tolerance_percent\":0,\"payout_interval_seconds\":999999,\"min_payout_amount\":999999,\"price_per_step\":1,\"price_unit\":\"sats\",\"min_purchase_steps\":0}," +
 		" {\"url\":\"https://testnut.cashu.space\",\"min_balance\":0,\"balance_tolerance_percent\":0,\"payout_interval_seconds\":999999,\"min_payout_amount\":999999,\"price_per_step\":1,\"price_unit\":\"sats\",\"min_purchase_steps\":0}] " +
-		"| unique_by(.url))' " +
+		"else .accepted_mints end)' " +
 		"/etc/tollgate/config.json > /tmp/cfg.tmp 2>&1 && " +
 		"mv /tmp/cfg.tmp /etc/tollgate/config.json && echo 'config updated' || echo 'no config'"
 	cfgOut := sshRun(client, cfgCmd)
@@ -455,20 +486,7 @@ func runDeployment(job *Job, req deployRequest) {
 		job.addLog("config.json: margin=" + strconv.Itoa(margin) + "%, devSplit=" + strconv.Itoa(devSplit) + "% (profit_share updated)")
 	}
 
-	// 8c: Inject testnut test mint into config.json so users can test with free sats.
-	// The stable tollgate-wrt package only includes production mints (coinos + minibits).
-	// We add the feeless testnut mint so users can get free test sats from
-	// https://nofee.testnut.cashu.space and verify the payment flow end-to-end.
-	testnutMintCmd := "jq 'if (.mints // [] | map(.url) | index(\"https://nofee.testnut.cashu.space\")) | not then " +
-		".mints += [{\"url\":\"https://nofee.testnut.cashu.space\",\"min_balance\":0,\"balance_tolerance_percent\":0,\"payout_interval_seconds\":999999,\"min_payout_amount\":999999,\"price_per_step\":1,\"price_unit\":\"sats\",\"purchase_min_steps\":0}] " +
-		"else . end' /etc/tollgate/config.json > /tmp/cfg_mint.tmp 2>&1 && " +
-		"mv /tmp/cfg_mint.tmp /etc/tollgate/config.json && echo 'testnut added' || echo 'testnut skipped'"
-	testnutOut := sshRun(client, testnutMintCmd)
-	if strings.Contains(testnutOut, "testnut added") {
-		job.addLog("config.json: testnut test mint added (free test sats for payment testing)")
-	} else {
-		job.addLog("testnut mint: " + truncate(testnutOut, 60))
-	}
+	// 8c: Testnut mints already injected in 8b above (accepted_mints array).
 
 	if strings.Contains(lnOut, "identities updated") || strings.Contains(cfgOut, "config updated") {
 		job.setStep(8, "done", "LNURL: "+req.LNURL)
