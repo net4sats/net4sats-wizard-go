@@ -2,3 +2,4 @@ dist/
 *.exe
 net4sats-wizard-*
 coverage*.out
+DLEQ-FIX-PLAN.md

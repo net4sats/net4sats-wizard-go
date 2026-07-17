@@ -468,6 +468,10 @@ func runDeployment(job *Job, req deployRequest) {
 		"'.margin=$m | " +
 		"(.profit_share[] | select(.identity == \"owner\") | .factor) = $of | " +
 		"(.profit_share[] | select(.identity == \"developer\") | .factor) = $df | " +
+		// Remove minibits mint (DLEQ keyset rotation bug — gonuts-tollgate v0.7.1
+		// verifies DLEQ proofs against the mint's current active keyset instead of
+		// the keyset that signed the proofs, causing failures after key rotation).
+		".accepted_mints = (.accepted_mints | map(select(.url | test(\"minibits\") | not))) | " +
 		// Add testnut test mints if not already present (idempotent by URL check).
 		// Uses map + index instead of unique_by for jq <1.7 compatibility on OpenWrt.
 		".accepted_mints = (if (.accepted_mints | map(.url) | index(\"https://nofee.testnut.cashu.space\")) | not then " +
@@ -484,6 +488,7 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	if strings.Contains(cfgOut, "config updated") {
 		job.addLog("config.json: margin=" + strconv.Itoa(margin) + "%, devSplit=" + strconv.Itoa(devSplit) + "% (profit_share updated)")
+		job.addLog("config.json: minibits mint excluded (DLEQ keyset rotation bug)")
 	}
 
 	// 8c: Testnut mints already injected in 8b above (accepted_mints array).
