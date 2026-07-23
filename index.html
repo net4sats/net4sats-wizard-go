@@ -158,11 +158,11 @@
     <div class="field">
       <label>Upstream connection</label>
       <div class="radio-group">
-        <div class="radio-card selected" id="mode-wan" onclick="selectMode('wan')">WAN (Ethernet)</div>
-        <div class="radio-card" id="mode-sta" onclick="selectMode('sta')">WiFi Repeater</div>
+        <div class="radio-card" id="mode-wan" onclick="selectMode('wan')">WAN (Ethernet)</div>
+        <div class="radio-card selected" id="mode-sta" onclick="selectMode('sta')">WiFi Repeater</div>
       </div>
     </div>
-    <div id="sta-fields" class="hidden">
+    <div id="sta-fields">
       <div class="field">
         <label>Upstream WiFi SSID</label>
         <div style="display:flex; gap:0.5rem; align-items:center;">
@@ -241,7 +241,7 @@
 <script>
 let detectedRouters = [];
 let pollTimer = null;
-let upstreamMode = 'wan';
+let upstreamMode = 'sta';
 let scannedSSIDs = [];
 let wifiScanned = false;
 
