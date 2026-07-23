@@ -10,8 +10,11 @@ import (
 const (
 	// net4satsPackage is the apk package name.
 	net4satsPackage = "net4sats"
-	// Stable release URLs from releases.tollgate.me
-	tollgatePkgURL = "https://github.com/OpenTollGate/tollgate-module-basic-go/releases/download/v0.5.0/tollgate-wrt_v0.5.0_aarch64_cortex-a53.ipk"
+	// TEMPORARY: point to fork release for E2E testing of PR #283 (fw4 nftables enforcement).
+	// Revert to upstream URL once PR #283 is merged upstream.
+	tollgatePkgURL = "https://github.com/felixfelix-bot/tollgate-module-basic-go/releases/download/v0.5.0-e2e-test/tollgate-wrt_v0.5.0_aarch64_cortex-a53.ipk"
+	// nftables enforcement include (from PR #283, installed as overlay after .ipk install)
+	tollgateNftEnforceURL = "https://github.com/felixfelix-bot/tollgate-module-basic-go/releases/download/v0.5.0-e2e-test/20-nds-enforce.nft"
 	// Pre-built OpenWrt firmware image with tollgate pre-installed (for future firmware flash step)
 	tollgateOSURL = "https://releases.tollgate.me/os/57e0f2468a17b8c7a84d9a2af62d1e02111a3b9bc898ec1d9183b1f7dd1db52e?channel=stable"
 	// Admin panel + rpcd plugin from net4sats GitHub releases
@@ -171,6 +174,17 @@ func runDeployment(job *Job, req deployRequest) {
 			job.addLog("WARNING: tollgate-wrt binary not found after install")
 			job.setStep(4, "error", "tollgate-wrt install failed")
 			return
+		}
+		// TEMPORARY: Install nftables enforcement overlay from PR #283
+		job.addLog("Installing fw4 nftables enforcement overlay (PR #283)...")
+		nftDl := sshRun(client, "wget -q -O /tmp/20-nds-enforce.nft '"+tollgateNftEnforceURL+"' 2>&1 && echo 'downloaded' || echo 'download failed'")
+		if strings.Contains(nftDl, "downloaded") {
+			sshRun(client, "mkdir -p /etc/nftables.d")
+			sshRun(client, "cp /tmp/20-nds-enforce.nft /etc/nftables.d/20-nds-enforce.nft")
+			sshRun(client, "rm -f /tmp/20-nds-enforce.nft")
+			job.addLog("fw4 nftables enforcement overlay installed")
+		} else {
+			job.addLog("WARNING: nftables enforcement overlay download failed — authenticated users may have no internet")
 		}
 		job.setStep(4, "done", "tollgate-wrt installed")
 	} else {
