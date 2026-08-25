@@ -215,14 +215,17 @@ func runDeployment(job *Job, req deployRequest) {
 			} else {
 				job.addLog("opkg feed install failed, downloading .ipk from OpenWrt repo...")
 				// Download nodogsplash + jq .ipk from OpenWrt package repo
-				// on laptop, push to router, install. The feed URL pattern:
-				// https://downloads.openwrt.org/releases/24.10.4/packages/aarch64_cortex-a53/packages/
-				ndsURL := "https://downloads.openwrt.org/releases/24.10.4/packages/aarch64_cortex-a53/packages/"
-				ndsListHTML := string(httpGetFileOrEmpty(ndsURL))
+				// on laptop, push to router, install. nodogsplash is in the
+				// routing/ subdirectory, jq is in packages/.
+				baseURL := "https://downloads.openwrt.org/releases/24.10.4/packages/aarch64_cortex-a53/"
+				routingURL := baseURL + "routing/"
+				packagesURL := baseURL + "packages/"
+				ndsListHTML := string(httpGetFileOrEmpty(routingURL))
+				jqListHTML := string(httpGetFileOrEmpty(packagesURL))
 				ndsPkg := extractIPKFilename(ndsListHTML, "nodogsplash")
-				jqPkg := extractIPKFilename(ndsListHTML, "jq")
+				jqPkg := extractIPKFilename(jqListHTML, "jq")
 				if ndsPkg != "" {
-					ndsData, ndsErr := httpGetFile(ndsURL + ndsPkg)
+					ndsData, ndsErr := httpGetFile(routingURL + ndsPkg)
 					if ndsErr == nil && len(ndsData) > 1000 {
 						pushNds := sshUploadPipe(client, ndsData, "cat > /tmp/"+ndsPkg+" && echo NDS_PUSHED")
 						if strings.Contains(pushNds, "NDS_PUSHED") {
@@ -231,7 +234,7 @@ func runDeployment(job *Job, req deployRequest) {
 					}
 				}
 				if jqPkg != "" {
-					jqData, jqErr := httpGetFile(ndsURL + jqPkg)
+					jqData, jqErr := httpGetFile(packagesURL + jqPkg)
 					if jqErr == nil && len(jqData) > 1000 {
 						pushJq := sshUploadPipe(client, jqData, "cat > /tmp/"+jqPkg+" && echo JQ_PUSHED")
 						if strings.Contains(pushJq, "JQ_PUSHED") {
@@ -505,13 +508,18 @@ func runDeployment(job *Job, req deployRequest) {
 	// 7c: uhttpd config — add net4sats (:8090) and luci (:8080) instances via UCI
 	// Must go into /etc/config/uhttpd (the only file uhttpd init reads)
 	uhttpdOut := sshRun(client, strings.Join([]string{
-		// Remove conflicting listeners from main uhttpd
-		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:80' 2>/dev/null; true",
-		"uci -q del_list uhttpd.main.listen_http='[::]:80' 2>/dev/null; true",
+		// Main uhttpd on port 80 → redirect to net4sats admin (:8090)
 		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8080' 2>/dev/null; true",
 		"uci -q del_list uhttpd.main.listen_http='[::]:8080' 2>/dev/null; true",
 		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:8090' 2>/dev/null; true",
 		"uci -q del_list uhttpd.main.listen_http='[::]:8090' 2>/dev/null; true",
+		"uci -q del_list uhttpd.main.listen_http='0.0.0.0:80' 2>/dev/null; true",
+		"uci add_list uhttpd.main.listen_http='0.0.0.0:80'",
+		"uci -q del_list uhttpd.main.listen_http='[::]:80' 2>/dev/null; true",
+		"uci add_list uhttpd.main.listen_http='[::]:80'",
+		"uci set uhttpd.main.home='/www/net4sats-redirect'",
+		"mkdir -p /www/net4sats-redirect",
+		"echo '<!DOCTYPE html><html><head><meta http-equiv=\"refresh\" content=\"0; url=http://tollgate.lan:8090/\"><script>location.replace(\"http://tollgate.lan:8090/\")</script></head><body>Redirecting to net4sats admin...</body></html>' > /www/net4sats-redirect/index.html",
 		// net4sats admin instance on :8090
 		"uci set uhttpd.net4sats=uhttpd",
 		"uci -q del_list uhttpd.net4sats.listen_http='0.0.0.0:8090' 2>/dev/null; true",
