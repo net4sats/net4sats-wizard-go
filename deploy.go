@@ -43,7 +43,7 @@ const (
 	tollgatePkgURLApk = "https://github.com/felixfelix-bot/tollgate-module-basic-go/releases/download/v0.6.1-post-merge/tollgate-wrt_main.56.b528e1d_aarch64_cortex-a53.apk"
 	// Admin panel + rpcd plugin from net4sats GitHub releases
 	// v1.0.3-alpha: built from upstream main tip 201968e (PR #24: SW cache bust, NDS/uhttpd fix, supports_ln).
-	configwizURL = "https://github.com/felixfelix-bot/configurationwizzard/releases/download/v1.0.5-alpha/net4sats-configwiz-1.0.5.tar.gz"
+	configwizURL = "https://github.com/felixfelix-bot/configurationwizzard/releases/download/v1.0.7-alpha/net4sats-configwiz-1.0.7-alpha.tar.gz"
 )
 
 // deploySteps returns the ordered deployment step definitions.
@@ -599,33 +599,38 @@ func runDeployment(job *Job, req deployRequest) {
 	lnOut := sshRun(client, lnCmd)
 
 	// 8b: Write margin + profit_share to config.json.
-	// Also inject the operator's chosen mint + testnut mints for testing.
+	// Also ensure 9 default mints (7 production + 2 testnut zero-fee) are present (idempotent).
+	// Does NOT strip minibits (DLEQ keyset rotation bug fixed in gonuts v0.11.1).
 	devSplit := clamp(req.DevSplit, 0, 50)
 	margin := clamp(req.Margin, 0, 100)
 	ownerFactor := strconv.FormatFloat(1.0-float64(devSplit)/100.0, 'f', 4, 64)
 	devFactor := strconv.FormatFloat(float64(devSplit)/100.0, 'f', 4, 64)
+	defaultMints := `[
+    {"url":"https://mint.coinos.io","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.minibits.cash/Bitcoin","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.lnserver.com","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.macadamia.cash","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.westernbtc.com","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://kashu.me","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.cubabitcoin.org","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://nofee.testnut.cashu.space","min_balance":0,"balance_tolerance_percent":0,"payout_interval_seconds":999999,"min_payout_amount":999999,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://testnut.cashu.space","min_balance":0,"balance_tolerance_percent":0,"payout_interval_seconds":999999,"min_payout_amount":999999,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0}
+  ]`
 	cfgCmd := "jq --argjson m " + strconv.Itoa(margin) + " " +
 		"--argjson of " + ownerFactor + " " +
 		"--argjson df " + devFactor + " " +
+		"--argjson dm '" + defaultMints + "' " +
 		"--arg mu " + req.Mint + " " +
 		"'.margin=$m | " +
 		"(.profit_share[] | select(.identity == \"owner\") | .factor) = $of | " +
 		"(.profit_share[] | select(.identity == \"developer\") | .factor) = $df | " +
-		// Remove minibits mint (DLEQ keyset rotation bug — gonuts-tollgate v0.7.1
-		// verifies DLEQ proofs against the mint's current active keyset instead of
-		// the keyset that signed the proofs, causing failures after key rotation).
-		".accepted_mints = (.accepted_mints | map(select(.url | test(\"minibits\") | not))) | " +
 		// Add operator's chosen mint if non-empty and not already present.
 		".accepted_mints = (if ($mu != \"\" and (.accepted_mints | map(.url) | index($mu)) | not) then " +
 		".accepted_mints + [{\"url\":$mu,\"min_balance\":64,\"balance_tolerance_percent\":10,\"payout_interval_seconds\":60,\"min_payout_amount\":128,\"price_per_step\":1,\"price_unit\":\"sats\",\"min_purchase_steps\":0}] " +
 		"else .accepted_mints end) | " +
-		// Add testnut test mints if not already present (idempotent by URL check).
+		// Add any of the 7 default mints that aren't already present (idempotent by URL).
 		// Uses map + index instead of unique_by for jq <1.7 compatibility on OpenWrt.
-		".accepted_mints = (if (.accepted_mints | map(.url) | index(\"https://nofee.testnut.cashu.space\")) | not then " +
-		".accepted_mints + " +
-		"[{\"url\":\"https://nofee.testnut.cashu.space\",\"min_balance\":0,\"balance_tolerance_percent\":0,\"payout_interval_seconds\":999999,\"min_payout_amount\":999999,\"price_per_step\":1,\"price_unit\":\"sats\",\"min_purchase_steps\":0}, " +
-		" {\"url\":\"https://testnut.cashu.space\",\"min_balance\":0,\"balance_tolerance_percent\":0,\"payout_interval_seconds\":999999,\"min_payout_amount\":999999,\"price_per_step\":1,\"price_unit\":\"sats\",\"min_purchase_steps\":0}] " +
-		"else .accepted_mints end)' " +
+		".accepted_mints = (.accepted_mints + ($dm | map(select(.url as $u | (.accepted_mints | map(.url) | index($u)) | not))))' " +
 		"/etc/tollgate/config.json > /tmp/cfg.tmp 2>&1 && " +
 		"mv /tmp/cfg.tmp /etc/tollgate/config.json && echo 'config updated' || echo 'no config'"
 	cfgOut := sshRun(client, cfgCmd)
@@ -635,10 +640,10 @@ func runDeployment(job *Job, req deployRequest) {
 	}
 	if strings.Contains(cfgOut, "config updated") {
 		job.addLog("config.json: margin=" + strconv.Itoa(margin) + "%, devSplit=" + strconv.Itoa(devSplit) + "% (profit_share updated)")
-		job.addLog("config.json: minibits mint excluded (DLEQ keyset rotation bug)")
+		job.addLog("config.json: mints configured (coinos, minibits, lnserver, macadamia, westernbtc, kashu, cubabitcoin, testnut x2)")
 	}
 
-	// 8c: Testnut mints already injected in 8b above (accepted_mints array).
+	// 8c: Default mints already injected in 8b above (accepted_mints array).
 
 	if strings.Contains(lnOut, "identities updated") || strings.Contains(cfgOut, "config updated") {
 		job.setStep(8, "done", "LNURL: "+req.LNURL)
