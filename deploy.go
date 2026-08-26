@@ -2,6 +2,7 @@ package main
 
 import (
 	cryptorand "crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -45,6 +46,101 @@ const (
 	// v1.0.3-alpha: built from upstream main tip 201968e (PR #24: SW cache bust, NDS/uhttpd fix, supports_ln).
 	configwizURL = "https://github.com/felixfelix-bot/configurationwizzard/releases/download/v1.0.7-alpha/net4sats-configwiz-1.0.7-alpha.tar.gz"
 )
+
+// ─── Remote command construction (injection-safe) ──────────────
+//
+// Operator-supplied values (passwords, SSIDs, WiFi keys, Lightning
+// addresses, mint URLs) must NEVER be interpolated into remote shell
+// command strings: the wizard drives a root SSH session, so any quote
+// splice in these fields is root code execution on the router. Two
+// passing mechanisms are used, both BusyBox-ash compatible:
+//
+//   - base64 carrier: the value is base64-encoded host-side (output
+//     alphabet [A-Za-z0-9+/=] contains no shell metacharacters) and
+//     decoded on the router via `echo <b64> | base64 -d` into a shell
+//     variable. BusyBox ships the base64 applet with -d support.
+//   - SSH stdin: the raw bytes are piped into a remote temp file
+//     (sshUploadPipe — same pattern as the package push) and consumed
+//     by jq with --rawfile (jq >= 1.6, which the deploy prerequisites
+//     install), never as an --arg string.
+
+// shellB64 returns s encoded for embedding as a base64 carrier.
+func shellB64(s string) string {
+	return base64.StdEncoding.EncodeToString([]byte(s))
+}
+
+// passwdCommand builds the root-password change command. The password
+// crosses as a base64 carrier and is decoded into a shell variable;
+// printf feeds it to passwd twice, newline-separated, without the
+// password ever appearing in the command string.
+func passwdCommand(password string) string {
+	return "pw=$(echo " + shellB64(password) + " | base64 -d) && " +
+		"printf '%s\\n%s\\n' \"$pw\" \"$pw\" | passwd root 2>&1"
+}
+
+// lnJQProgram updates the owner identity's lightning_address in
+// /etc/tollgate/identities.json ($la supplied via --rawfile).
+const lnJQProgram = `(.public_identities[] | select(.name == "owner") | .lightning_address) = $la`
+
+// lnIdentCommand writes the operator's Lightning address into
+// identities.json. The caller pipes the address bytes over SSH stdin
+// into /tmp/lnaddr.val (cat > file); jq consumes them via --rawfile, so
+// the address never appears in the command string.
+func lnIdentCommand() string {
+	return "cat > /tmp/lnaddr.val && " +
+		"jq --rawfile la /tmp/lnaddr.val '" + lnJQProgram + "' " +
+		"/etc/tollgate/identities.json > /tmp/ident.tmp 2>&1 && " +
+		"mv /tmp/ident.tmp /etc/tollgate/identities.json && echo 'identities updated' || echo 'no identities'; " +
+		"rm -f /tmp/lnaddr.val"
+}
+
+// defaultMints is the idempotent mint set pushed into config.json
+// (7 production + 2 testnut zero-fee).
+const defaultMints = `[
+    {"url":"https://mint.coinos.io","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.minibits.cash/Bitcoin","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.lnserver.com","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.macadamia.cash","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.westernbtc.com","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://kashu.me","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://mint.cubabitcoin.org","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://nofee.testnut.cashu.space","min_balance":0,"balance_tolerance_percent":0,"payout_interval_seconds":999999,"min_payout_amount":999999,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
+    {"url":"https://testnut.cashu.space","min_balance":0,"balance_tolerance_percent":0,"payout_interval_seconds":999999,"min_payout_amount":999999,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0}
+  ]`
+
+// cfgJQProgram rewrites config.json: margin, owner/developer profit
+// shares, operator mint and default-mint additions ($m/$of/$df/$dm via
+// --argjson from host-computed values; $mu via --rawfile).
+const cfgJQProgram = `.margin=$m | ` +
+	`(.profit_share[] | select(.identity == "owner") | .factor) = $of | ` +
+	`(.profit_share[] | select(.identity == "developer") | .factor) = $df | ` +
+	// Add operator's chosen mint if non-empty and not already present.
+	`.accepted_mints = (if ($mu != "" and (.accepted_mints | map(.url) | index($mu)) | not) then ` +
+	`.accepted_mints + [{"url":$mu,"min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0}] ` +
+	`else .accepted_mints end) | ` +
+	// Add any of the default mints that aren't already present (idempotent by URL).
+	// Uses map + index instead of unique_by for jq <1.7 compatibility on OpenWrt.
+	// The existing URLs are snapshotted into $urls first — referencing
+	// .accepted_mints inside the $dm element context yields null and made
+	// this filter (and therefore the whole step) fail on every run.
+	`.accepted_mints = ((.accepted_mints | map(.url)) as $urls | .accepted_mints + ($dm | map(select(.url as $u | ($urls | index($u)) | not))))`
+
+// cfgConfigCommand builds the config.json update command. margin, the
+// owner/developer factors and the default mints are host-computed
+// (--argjson); the operator's mint URL is piped over SSH stdin by the
+// caller into /tmp/mint.val and consumed via --rawfile — it never enters
+// the command string.
+func cfgConfigCommand(margin int, ownerFactor, devFactor string) string {
+	return "cat > /tmp/mint.val && " +
+		"jq --argjson m " + strconv.Itoa(margin) + " " +
+		"--argjson of " + ownerFactor + " " +
+		"--argjson df " + devFactor + " " +
+		"--argjson dm '" + defaultMints + "' " +
+		"--rawfile mu /tmp/mint.val '" + cfgJQProgram + "' " +
+		"/etc/tollgate/config.json > /tmp/cfg.tmp 2>&1 && " +
+		"mv /tmp/cfg.tmp /etc/tollgate/config.json && echo 'config updated' || echo 'no config'; " +
+		"rm -f /tmp/mint.val"
+}
 
 // deploySteps returns the ordered deployment step definitions.
 func deploySteps() []Step {
@@ -116,8 +212,7 @@ func runDeployment(job *Job, req deployRequest) {
 	// Step 2: Set root password
 	job.setStep(2, "running", "")
 	if req.Password != "" {
-		passwdCmd := "echo -e '" + req.Password + "\\n" + req.Password + "' | passwd root 2>&1"
-		passwdOut := sshRun(client, passwdCmd)
+		passwdOut := sshRun(client, passwdCommand(req.Password))
 		if strings.Contains(passwdOut, "changed") || strings.Contains(passwdOut, "successfully") {
 			job.addLog("Root password set")
 			job.setStep(2, "done", "password updated")
@@ -592,48 +687,20 @@ func runDeployment(job *Job, req deployRequest) {
 	job.setStep(8, "running", "")
 
 	// 8a: Write lightning_address to identities.json (owner identity).
-	lnCmd := "jq --arg la '" + req.LNURL + "' " +
-		"'(.public_identities[] | select(.name == \"owner\") | .lightning_address) = $la' " +
-		"/etc/tollgate/identities.json > /tmp/ident.tmp 2>&1 && " +
-		"mv /tmp/ident.tmp /etc/tollgate/identities.json && echo 'identities updated' || echo 'no identities'"
-	lnOut := sshRun(client, lnCmd)
+	// The address travels over SSH stdin into a remote temp file consumed
+	// by jq --rawfile (see lnIdentCommand).
+	lnOut := sshUploadPipe(client, []byte(req.LNURL), lnIdentCommand())
 
 	// 8b: Write margin + profit_share to config.json.
 	// Also ensure 9 default mints (7 production + 2 testnut zero-fee) are present (idempotent).
 	// Does NOT strip minibits (DLEQ keyset rotation bug fixed in gonuts v0.11.1).
+	// The operator's mint URL travels over SSH stdin into /tmp/mint.val
+	// (see cfgConfigCommand).
 	devSplit := clamp(req.DevSplit, 0, 50)
 	margin := clamp(req.Margin, 0, 100)
 	ownerFactor := strconv.FormatFloat(1.0-float64(devSplit)/100.0, 'f', 4, 64)
 	devFactor := strconv.FormatFloat(float64(devSplit)/100.0, 'f', 4, 64)
-	defaultMints := `[
-    {"url":"https://mint.coinos.io","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
-    {"url":"https://mint.minibits.cash/Bitcoin","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
-    {"url":"https://mint.lnserver.com","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
-    {"url":"https://mint.macadamia.cash","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
-    {"url":"https://mint.westernbtc.com","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
-    {"url":"https://kashu.me","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
-    {"url":"https://mint.cubabitcoin.org","min_balance":64,"balance_tolerance_percent":10,"payout_interval_seconds":60,"min_payout_amount":128,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
-    {"url":"https://nofee.testnut.cashu.space","min_balance":0,"balance_tolerance_percent":0,"payout_interval_seconds":999999,"min_payout_amount":999999,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0},
-    {"url":"https://testnut.cashu.space","min_balance":0,"balance_tolerance_percent":0,"payout_interval_seconds":999999,"min_payout_amount":999999,"price_per_step":1,"price_unit":"sats","min_purchase_steps":0}
-  ]`
-	cfgCmd := "jq --argjson m " + strconv.Itoa(margin) + " " +
-		"--argjson of " + ownerFactor + " " +
-		"--argjson df " + devFactor + " " +
-		"--argjson dm '" + defaultMints + "' " +
-		"--arg mu " + req.Mint + " " +
-		"'.margin=$m | " +
-		"(.profit_share[] | select(.identity == \"owner\") | .factor) = $of | " +
-		"(.profit_share[] | select(.identity == \"developer\") | .factor) = $df | " +
-		// Add operator's chosen mint if non-empty and not already present.
-		".accepted_mints = (if ($mu != \"\" and (.accepted_mints | map(.url) | index($mu)) | not) then " +
-		".accepted_mints + [{\"url\":$mu,\"min_balance\":64,\"balance_tolerance_percent\":10,\"payout_interval_seconds\":60,\"min_payout_amount\":128,\"price_per_step\":1,\"price_unit\":\"sats\",\"min_purchase_steps\":0}] " +
-		"else .accepted_mints end) | " +
-		// Add any of the 7 default mints that aren't already present (idempotent by URL).
-		// Uses map + index instead of unique_by for jq <1.7 compatibility on OpenWrt.
-		".accepted_mints = (.accepted_mints + ($dm | map(select(.url as $u | (.accepted_mints | map(.url) | index($u)) | not))))' " +
-		"/etc/tollgate/config.json > /tmp/cfg.tmp 2>&1 && " +
-		"mv /tmp/cfg.tmp /etc/tollgate/config.json && echo 'config updated' || echo 'no config'"
-	cfgOut := sshRun(client, cfgCmd)
+	cfgOut := sshUploadPipe(client, []byte(req.Mint), cfgConfigCommand(margin, ownerFactor, devFactor))
 
 	if strings.Contains(lnOut, "identities updated") {
 		job.addLog("identities.json: lightning_address=" + req.LNURL + " for owner")
@@ -759,7 +826,12 @@ func jobFail(job *Job, step int, stepDetail, jobErr string) {
 // rollbackWireless) and performs a single commit pair; the caller applies
 // the whole change set with ONE `wifi reload`.
 func staSetupScript(ssid, wifiKey string) string {
+	// ssid/wifiKey cross as base64 carriers and are decoded into shell
+	// variables before any uci call — they never appear in the script
+	// text itself (injection-safe; see the command-construction section).
 	return `
+sta_ssid=$(echo ` + shellB64(ssid) + ` | base64 -d)
+sta_key=$(echo ` + shellB64(wifiKey) + ` | base64 -d)
 target=radio0
 uci -q get wireless.radio0 >/dev/null 2>&1 || target=$(uci -q show wireless 2>/dev/null | sed -n "s/^wireless\.\([^.]*\)=wifi-device$/\1/p" | head -n1)
 if [ -z "$target" ]; then echo 'NO_RADIO'; exit 0; fi
@@ -771,9 +843,9 @@ uci set wireless.net4sats_uplink=wifi-iface &&
 uci set wireless.net4sats_uplink.network='wwan' &&
 uci set wireless.net4sats_uplink.device="$target" &&
 uci set wireless.net4sats_uplink.mode='sta' &&
-uci set wireless.net4sats_uplink.ssid='` + ssid + `' &&
+uci set wireless.net4sats_uplink.ssid="$sta_ssid" &&
 uci set wireless.net4sats_uplink.encryption='psk2' &&
-uci set wireless.net4sats_uplink.key='` + wifiKey + `' &&
+uci set wireless.net4sats_uplink.key="$sta_key" &&
 uci set wireless.net4sats_uplink.disabled='0' &&
 uci set network.wwan=interface &&
 uci set network.wwan.proto='dhcp' &&

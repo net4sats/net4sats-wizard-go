@@ -158,9 +158,11 @@ func TestStaSetupScript(t *testing.T) {
 		"uci commit network",
 		// Success marker parsed by configureSTA.
 		"STA_CFG_OK target=$target",
-		// Operator-supplied credentials land in the right sections.
-		"ssid='Net4Sats-Field'",
-		"key='correct horse'",
+		// Operator-supplied credentials land in the right sections —
+		// base64-carried and decoded in-shell (injection-safe; payload
+		// proofs in security_hardening_test.go).
+		`uci set wireless.net4sats_uplink.ssid="$sta_ssid"`,
+		`uci set wireless.net4sats_uplink.key="$sta_key"`,
 	} {
 		if want == "rm /etc/config/wireless" {
 			if strings.Contains(s, want) {
@@ -175,5 +177,11 @@ func TestStaSetupScript(t *testing.T) {
 	// Exactly ONE commit per config file (no partial applies).
 	if got := strings.Count(s, "uci commit"); got != 2 {
 		t.Errorf("staSetupScript has %d `uci commit` calls, want exactly 2 (wireless+network)", got)
+	}
+	// Credentials round-trip exactly through the base64 carriers.
+	carriers := decodedCarriers(t, s)
+	wantCreds := []string{"Net4Sats-Field", "correct horse"}
+	if len(carriers) != len(wantCreds) || carriers[0] != wantCreds[0] || carriers[1] != wantCreds[1] {
+		t.Errorf("staSetupScript carriers decode to %q, want %q", carriers, wantCreds)
 	}
 }
