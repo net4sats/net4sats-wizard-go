@@ -2,11 +2,14 @@ package main
 
 import (
 	cryptorand "crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -46,6 +49,48 @@ const (
 	// v1.0.3-alpha: built from upstream main tip 201968e (PR #24: SW cache bust, NDS/uhttpd fix, supports_ln).
 	configwizURL = "https://github.com/felixfelix-bot/configurationwizzard/releases/download/v1.0.7-alpha/net4sats-configwiz-1.0.7-alpha.tar.gz"
 )
+
+// artifactPins maps every artifact URL the wizard downloads and installs
+// on the router to the expected sha256 digest (hex) of that artifact
+// (audit S-4). Verification fails closed: a URL without an entry here is
+// refused just like a hash mismatch, so the map must cover every URL
+// constant passed to httpGetFile on the install path (asserted by
+// TestArtifactPinsCoverDownloadedURLConstants). Release assets are
+// immutable per tag; if an artifact is ever re-uploaded under the same
+// tag, deploys abort until the pin here is refreshed — that is the
+// intended supply-chain posture.
+//
+// Digests computed 2026-08-26 from the felixfelix-bot release assets:
+//
+//	tollgate-wrt_v0.7.0-alpha10_aarch64_cortex-a53.ipk  7475197 bytes
+//	tollgate-wrt_main.56.b528e1d_aarch64_cortex-a53.apk 7386786 bytes
+var artifactPins = map[string]string{
+	tollgatePkgURL:    "786565ec18f929c938c53d6b0303115ecaa8c238809a8d7e27fd79bbca100cd6",
+	tollgatePkgURLApk: "c9b02855fee2d63c24e1bc927c3762c67d7cc64c116b60c5502e9000138fa205",
+}
+
+// verifyArtifactPin enforces the sha256 pin for a downloaded artifact
+// (bytes form — laptop-side download path). It fails closed on a missing
+// pin as well as on a mismatch; the deploy call path must abort before any
+// SSH push when it returns an error.
+func verifyArtifactPin(url string, data []byte) error {
+	sum := sha256.Sum256(data)
+	return verifyArtifactPinHex(url, hex.EncodeToString(sum[:]))
+}
+
+// verifyArtifactPinHex is the hex form of the gate, used by the
+// router-side wget fallback where the digest comes from the router's
+// sha256sum rather than a local hash of the bytes.
+func verifyArtifactPinHex(url, gotHex string) error {
+	want, ok := artifactPins[url]
+	if !ok {
+		return fmt.Errorf("no sha256 pin for %s — aborting deploy (refusing to install unpinned artifact)", url)
+	}
+	if !strings.EqualFold(gotHex, want) {
+		return fmt.Errorf("checksum mismatch for %s — aborting deploy (expected %s, got %s)", url, want, gotHex)
+	}
+	return nil
+}
 
 // ─── Remote command construction (injection-safe) ──────────────
 //
@@ -266,16 +311,27 @@ func runDeployment(job *Job, req deployRequest) {
 	// a freshly STA-connected router often has no working DNS yet.
 	job.addLog("Downloading tollgate-wrt v0.7.0-alpha10 " + pkgExtension + " (laptop-side)...")
 	pkgOnRouter := false
-	if data, err := httpGetFile(selectedPkgURL); err == nil && len(data) > 0 {
+	data, dlErr := httpGetFile(selectedPkgURL)
+	if dlErr == nil && len(data) > 0 {
+		// S-4: verify the sha256 pin BEFORE pushing anything to the
+		// router. A mismatch (or a URL without a pin — default-deny)
+		// aborts the deploy outright: falling through to the router-side
+		// wget fallback would just re-download the same tampered
+		// artifact from the same source.
+		if verr := verifyArtifactPin(selectedPkgURL, data); verr != nil {
+			job.addLog("ERROR: " + verr.Error())
+			job.setStep(4, "error", "tollgate-wrt artifact failed sha256 verification")
+			return
+		}
 		push := sshUploadPipe(client, data, "cat > /tmp/tollgate-wrt"+pkgExtension+" && echo PUSH_OK")
 		if strings.Contains(push, "PUSH_OK") {
 			pkgOnRouter = true
-			job.addLog(fmt.Sprintf("Package downloaded on laptop (%d KB), pushed to router via SSH", len(data)/1024))
+			job.addLog(fmt.Sprintf("Package downloaded on laptop (%d KB), sha256 verified, pushed to router via SSH", len(data)/1024))
 		} else {
 			job.addLog("SSH push failed: " + truncate(push, 80))
 		}
-	} else if err != nil {
-		job.addLog("Laptop download failed: " + truncate(err.Error(), 80) + " — falling back to router-side wget")
+	} else if dlErr != nil {
+		job.addLog("Laptop download failed: " + truncate(dlErr.Error(), 80) + " — falling back to router-side wget")
 	}
 
 	// FALLBACK: router-side wget, with a real DNS probe and wget's stderr
@@ -284,9 +340,19 @@ func runDeployment(job *Job, req deployRequest) {
 	if !pkgOnRouter {
 		probe := sshRun(client, "nslookup github.com 2>&1 | tail -n2")
 		job.addLog("Router DNS probe: " + truncate(probe, 60))
-		wgetOut := sshRun(client, "wget -O /tmp/tollgate-wrt"+pkgExtension+" '"+selectedPkgURL+"' 2>&1; [ -s /tmp/tollgate-wrt"+pkgExtension+"] ] && echo WGET_OK || echo WGET_FAIL")
+		wgetOut := sshRun(client, "wget -O /tmp/tollgate-wrt"+pkgExtension+" '"+selectedPkgURL+"' 2>&1; [ -s /tmp/tollgate-wrt"+pkgExtension+" ] && echo WGET_OK || echo WGET_FAIL")
 		job.addLog("wget: " + truncate(wgetOut, 120))
 		if strings.Contains(wgetOut, "WGET_OK") {
+			// S-4: the router-side download must clear the same sha256
+			// gate as the laptop-side one; an empty digest (no sha256sum
+			// applet) fails closed as a mismatch.
+			sumHex := strings.TrimSpace(sshRun(client, "sha256sum /tmp/tollgate-wrt"+pkgExtension+" 2>/dev/null | cut -d' ' -f1"))
+			if verr := verifyArtifactPinHex(selectedPkgURL, sumHex); verr != nil {
+				job.addLog("ERROR: " + verr.Error())
+				job.setStep(4, "error", "tollgate-wrt artifact failed sha256 verification")
+				return
+			}
+			job.addLog("Router-side download verified against sha256 pin")
 			pkgOnRouter = true
 		}
 	}
@@ -317,8 +383,14 @@ func runDeployment(job *Job, req deployRequest) {
 				packagesURL := baseURL + "packages/"
 				ndsListHTML := string(httpGetFileOrEmpty(routingURL))
 				jqListHTML := string(httpGetFileOrEmpty(packagesURL))
-				ndsPkg := extractIPKFilename(ndsListHTML, "nodogsplash")
-				jqPkg := extractIPKFilename(jqListHTML, "jq")
+				ndsPkg, ndsErr := extractIPKFilename(ndsListHTML, "nodogsplash")
+				if ndsErr != nil {
+					job.addLog("ERROR: " + ndsErr.Error())
+				}
+				jqPkg, jqErr := extractIPKFilename(jqListHTML, "jq")
+				if jqErr != nil {
+					job.addLog("ERROR: " + jqErr.Error())
+				}
 				if ndsPkg != "" {
 					ndsData, ndsErr := httpGetFile(routingURL + ndsPkg)
 					if ndsErr == nil && len(ndsData) > 1000 {
@@ -329,7 +401,7 @@ func runDeployment(job *Job, req deployRequest) {
 					}
 				}
 				if jqPkg != "" {
-				jqData, jqErr := httpGetFile(packagesURL + jqPkg)
+					jqData, jqErr := httpGetFile(packagesURL + jqPkg)
 					if jqErr == nil && len(jqData) > 1000 {
 						pushJq := sshUploadPipe(client, jqData, "cat > /tmp/"+jqPkg+" && echo JQ_PUSHED")
 						if strings.Contains(pushJq, "JQ_PUSHED") {
@@ -980,8 +1052,8 @@ func configureSTA(job *Job, pclient **ssh.Client, ip, password, ssid, wifiPass s
 				// CONFLICT — change LAN to a random 10.x.y.1/24
 				randBytes := make([]byte, 2)
 				cryptorand.Read(randBytes)
-				newSecond := int(randBytes[0])%200 + 10  // 10-210
-				newThird := int(randBytes[1])%200 + 2    // 2-202
+				newSecond := int(randBytes[0])%200 + 10 // 10-210
+				newThird := int(randBytes[1])%200 + 2   // 2-202
 				newLanIP := fmt.Sprintf("10.%d.%d.1", newSecond, newThird)
 
 				job.addLog(fmt.Sprintf("LAN subnet conflict with upstream (%s.0/24 == %s.0/24), changing LAN to %s/24", lanPrefix, gwPrefix, newLanIP))
@@ -1047,14 +1119,26 @@ func httpGetFileOrEmpty(url string) []byte {
 }
 
 // extractIPKFilename scans an OpenWrt package directory listing (HTML) and
-// returns the first .ipk filename that starts with the given package name.
-// e.g. extractIPKFilename(html, "nodogsplash") → "nodogsplash_5.0.2-1_aarch64_cortex-a53.ipk"
-func extractIPKFilename(html string, pkgName string) string {
+// returns the first .ipk filename for the given package, e.g.
+// extractIPKFilename(html, "nodogsplash") → "nodogsplash_5.0.2-1_aarch64_cortex-a53.ipk".
+// A candidate that begins with <pkgName>_ but fails the strict name check
+// ^<pkgName>_[0-9][A-Za-z0-9._-]*\.ipk$ (path traversal, shell
+// metacharacters, non-numeric version — the name is interpolated into SSH
+// command strings, so only a shell-safe charset is accepted) is rejected
+// with an error; a listing containing no candidate at all yields ("", nil).
+func extractIPKFilename(html string, pkgName string) (string, error) {
 	// The listing has entries like: <a href="nodogsplash_5.0.2-1_aarch64_cortex-a53.ipk">
 	prefix := pkgName + "_"
+	strict := regexp.MustCompile(`^` + regexp.QuoteMeta(pkgName) + `_[0-9][A-Za-z0-9._-]*\.ipk$`)
 	for _, line := range strings.Split(html, "\n") {
 		idx := strings.Index(line, prefix)
 		if idx < 0 {
+			continue
+		}
+		// A match starting mid-token (e.g. "libnodogsplash_1.ipk" when
+		// scanning for "nodogsplash") is a different package — not a
+		// candidate.
+		if idx > 0 && isFilenameByte(line[idx-1]) {
 			continue
 		}
 		rest := line[idx:]
@@ -1065,10 +1149,21 @@ func extractIPKFilename(html string, pkgName string) string {
 		// Verify the character after .ipk is a quote or end of attribute
 		afterIPK := rest[end+4:]
 		if len(afterIPK) == 0 || afterIPK[0] == '"' || afterIPK[0] == '\'' || afterIPK[0] == '<' {
-			return rest[:end+4]
+			cand := rest[:end+4]
+			if !strict.MatchString(cand) {
+				return "", fmt.Errorf("rejecting suspicious %s listing entry %q — failed strict filename check", pkgName, cand)
+			}
+			return cand, nil
 		}
 	}
-	return ""
+	return "", nil
+}
+
+// isFilenameByte reports whether b can appear inside a package filename
+// token; used to reject prefix matches that start mid-token.
+func isFilenameByte(b byte) bool {
+	return b == '.' || b == '-' || b == '_' ||
+		(b >= '0' && b <= '9') || (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z')
 }
 
 func truncate(s string, maxLen int) string {
