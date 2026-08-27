@@ -46,8 +46,8 @@ const (
 	// OpenWrt 25.12+ cannot install legacy .ipk (ar archive) packages.
 	tollgatePkgURLApk = "https://github.com/felixfelix-bot/tollgate-module-basic-go/releases/download/v0.6.1-post-merge/tollgate-wrt_main.56.b528e1d_aarch64_cortex-a53.apk"
 	// Admin panel + rpcd plugin from net4sats GitHub releases
-	// v1.0.3-alpha: built from upstream main tip 201968e (PR #24: SW cache bust, NDS/uhttpd fix, supports_ln).
-	configwizURL = "https://github.com/felixfelix-bot/configurationwizzard/releases/download/v1.0.7-alpha/net4sats-configwiz-1.0.7-alpha.tar.gz"
+	// v1.0.10-alpha: built from upstream main tip 7c18f48 (PR #30: pricing block on Cashu tab).
+	configwizURL = "https://github.com/felixfelix-bot/configurationwizzard/releases/download/v1.0.10-alpha/net4sats-configwiz-1.0.10-alpha.tar.gz"
 )
 
 // artifactPins maps every artifact URL the wizard downloads and installs
