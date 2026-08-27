@@ -9,6 +9,7 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"os"
 	"regexp"
 	"sort"
 	"strconv"
@@ -40,7 +41,48 @@ func validLightningAddress(s string) bool {
 	return lnAddrRe.MatchString(s) || lnurlRe.MatchString(s)
 }
 
-const listenAddr = ":8099"
+// defaultListenAddr binds the wizard to loopback only: the deploy API
+// drives a root SSH session on the router, so a wildcard bind would let
+// any host on the LAN drive deploys against it. Operators who accept
+// that risk can override with WIZARD_BIND (e.g. WIZARD_BIND=0.0.0.0:8099).
+const defaultListenAddr = "127.0.0.1:8099"
+
+// listenAddress returns the address the wizard serves on: WIZARD_BIND if
+// set, else the loopback default.
+func listenAddress() string {
+	if bind := strings.TrimSpace(os.Getenv("WIZARD_BIND")); bind != "" {
+		return bind
+	}
+	return defaultListenAddr
+}
+
+// corsAllowedOrigins is the exact allowlist of Origins that may read
+// wizard responses cross-origin. A wildcard ACAO on this service lets
+// any website the operator visits drive the deploy API from their
+// browser; only the wizard's own loopback origins are trusted.
+var corsAllowedOrigins = map[string]bool{
+	"http://127.0.0.1:8099": true,
+	"http://localhost:8099": true,
+}
+
+// corsMiddleware dispatches to next after setting CORS headers.
+// Access-Control-Allow-Origin is echoed only for allowlisted origins —
+// foreign origins get no ACAO header at all, so browsers block
+// cross-origin reads. Methods/headers advertisement is unchanged.
+func corsMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if origin := r.Header.Get("Origin"); corsAllowedOrigins[origin] {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
+		if r.Method == "OPTIONS" {
+			w.WriteHeader(204)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
 
 // ─── Job tracking ─────────────────────────────────────────────
 
@@ -581,19 +623,12 @@ func main() {
 	mux.HandleFunc("/", handleIndex)
 
 	// CORS for local dev
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type")
-		if r.Method == "OPTIONS" {
-			w.WriteHeader(204)
-			return
-		}
-		mux.ServeHTTP(w, r)
-	})
+	handler := corsMiddleware(mux)
 
-	fmt.Printf("net4sats wizard running on http://localhost%s\n", listenAddr)
+	addr := listenAddress()
+	fmt.Printf("net4sats wizard running on http://%s\n", addr)
 	fmt.Println("Open this URL in your browser to set up a router.")
-	log.Fatal(http.ListenAndServe(listenAddr, handler))
+	fmt.Println("To serve on other interfaces, set WIZARD_BIND (e.g. WIZARD_BIND=0.0.0.0:8099).")
+	log.Fatal(http.ListenAndServe(addr, handler))
 	_ = io.Discard // keep import
 }
